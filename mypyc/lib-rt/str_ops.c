@@ -621,3 +621,16 @@ CPyTagged CPyStr_Ord(PyObject *obj) {
         PyExc_TypeError, "ord() expected a character, but a string of length %zd found", s);
     return CPY_INT_TAG;
 }
+
+bool CPyStr_IsSpace(PyObject *str) {
+    Py_ssize_t len = PyUnicode_GET_LENGTH(str);
+    if (len == 0) return false;
+
+    int kind = PyUnicode_KIND(str);
+    const void *data = PyUnicode_DATA(str);
+    for (Py_ssize_t i = 0; i < len; i++) {
+        if (!Py_UNICODE_ISSPACE(PyUnicode_READ(kind, data, i)))
+            return false;
+    }
+    return true;
+}

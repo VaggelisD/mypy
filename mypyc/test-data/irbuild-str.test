@@ -771,3 +771,16 @@ L0:
     r0 = 'literal'
     r1 = 'literal'
     return 1
+
+
+[case testStrIsSpace]
+def is_space(x: str) -> bool:
+    return x.isspace()
+[out]
+def is_space(x):
+    x :: str
+    r0 :: bool
+L0:
+    r0 = CPyStr_IsSpace(x)
+    return r0
+
