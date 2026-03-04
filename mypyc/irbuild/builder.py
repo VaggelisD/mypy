@@ -222,6 +222,7 @@ class IRBuilder:
         self.nested_fitems = pbv.nested_funcs.keys()
         self.fdefs_to_decorators = pbv.funcs_to_decorators
         self.module_import_groups = pbv.module_import_groups
+        self.comp_to_fitem = pbv.comp_to_fitem
 
         self.singledispatch_impls = singledispatch_impls
 
@@ -1253,6 +1254,33 @@ class IRBuilder:
         return builder.args, runtime_args, builder.blocks, ret_type, fn_info
 
     @contextmanager
+    def enter_scope(self, fn_info: FuncInfo) -> Iterator[None]:
+        """Push a lightweight scope for comprehensions.
+
+        Unlike enter(), this reuses the same LowLevelIRBuilder (same basic
+        blocks and registers) but pushes new symtable and fn_info entries
+        so that the closure machinery sees a scope boundary.
+        """
+        self.builders.append(self.builder)
+        self.symtables.append({})
+        self.runtime_args.append([])
+        self.fn_info = fn_info
+        self.fn_infos.append(self.fn_info)
+        self.ret_types.append(none_rprimitive)
+        self.nonlocal_control.append(BaseNonlocalControl())
+        try:
+            yield
+        finally:
+            self.builders.pop()
+            self.symtables.pop()
+            self.runtime_args.pop()
+            self.ret_types.pop()
+            self.fn_infos.pop()
+            self.nonlocal_control.pop()
+            self.builder = self.builders[-1]
+            self.fn_info = self.fn_infos[-1]
+
+    @contextmanager
     def enter_method(
         self,
         class_ir: ClassIR,
@@ -1370,6 +1398,8 @@ class IRBuilder:
         self.fn_info.env_class.attributes[name] = rtype
         if always_defined:
             self.fn_info.env_class.attrs_with_defaults.add(name)
+        if base._curr_env_reg is None:
+            return
         attr_target = AssignmentTargetAttr(base.curr_env_reg, name)
 
         if reassign:

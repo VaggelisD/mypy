@@ -84,6 +84,8 @@ from mypyc.ir.rtypes import (
 from mypyc.irbuild.ast_helpers import is_borrow_friendly_expr, process_conditional
 from mypyc.irbuild.builder import IRBuilder, int_borrow_friendly_op
 from mypyc.irbuild.constant_fold import constant_fold_expr
+from mypyc.irbuild.context import FuncInfo
+from mypyc.irbuild.env_class import add_vars_to_env, finalize_env_class, setup_env_class
 from mypyc.irbuild.for_helpers import (
     comprehension_helper,
     raise_error_if_contains_unreachable_names,
@@ -1055,20 +1057,50 @@ def _visit_display(
 
 
 # Comprehensions
+#
+# Unlike CPython, mypyc always inlines comprehensions i.e the loop body is
+# emitted directly into the enclosing function's IR (no implicit function
+# call).
+#
+# However, when a comprehension body contains a lambda,
+# we need a lightweight scope boundary (enter_scope) so the closure/env-class
+# machinery can see the comprehension as a separate scope. The comprehension
+# is still inlined (same basic blocks and registers), but we push a new
+# FuncInfo and set up an env class so the lambda can capture loop variables
+# through the standard env-class chain. Comprehensions without lambdas need
+# no scope boundary at all.
 
 
 def transform_list_comprehension(builder: IRBuilder, o: ListComprehension) -> Value:
-    return translate_list_comprehension(builder, o.generator)
+    gen = o.generator
+    if gen in builder.comp_to_fitem:
+        return _translate_comprehension_with_scope(
+            builder, gen, lambda: translate_list_comprehension(builder, gen)
+        )
+    return translate_list_comprehension(builder, gen)
 
 
 def transform_set_comprehension(builder: IRBuilder, o: SetComprehension) -> Value:
-    return translate_set_comprehension(builder, o.generator)
+    gen = o.generator
+    if gen in builder.comp_to_fitem:
+        return _translate_comprehension_with_scope(
+            builder, gen, lambda: translate_set_comprehension(builder, gen)
+        )
+    return translate_set_comprehension(builder, gen)
 
 
 def transform_dictionary_comprehension(builder: IRBuilder, o: DictionaryComprehension) -> Value:
     if raise_error_if_contains_unreachable_names(builder, o):
         return builder.none()
 
+    if o in builder.comp_to_fitem:
+        return _translate_comprehension_with_scope(
+            builder, o, lambda: _dict_comp_body(builder, o)
+        )
+    return _dict_comp_body(builder, o)
+
+
+def _dict_comp_body(builder: IRBuilder, o: DictionaryComprehension) -> Value:
     d = builder.maybe_spill(builder.call_c(dict_new_op, [], o.line))
     loop_params = list(zip(o.indices, o.sequences, o.condlists, o.is_async))
 
@@ -1079,6 +1111,28 @@ def transform_dictionary_comprehension(builder: IRBuilder, o: DictionaryComprehe
 
     comprehension_helper(builder, loop_params, gen_inner_stmts, o.line)
     return builder.read(d)
+
+
+def _translate_comprehension_with_scope(
+    builder: IRBuilder,
+    node: GeneratorExpr | DictionaryComprehension,
+    gen_body: Callable[[], Value],
+) -> Value:
+    """Wrap comprehension body with a lightweight scope for closure capture."""
+    comp_fdef = builder.comp_to_fitem[node]
+    fn_info = FuncInfo(
+        fitem=comp_fdef,
+        name=comp_fdef.name,
+        is_nested=True,
+        contains_nested=True,
+        is_comprehension_scope=True,
+    )
+
+    with builder.enter_scope(fn_info):
+        setup_env_class(builder)
+        finalize_env_class(builder)
+        add_vars_to_env(builder)
+        return gen_body()
 
 
 # Misc
