@@ -536,7 +536,11 @@ def handle_ext_method(builder: IRBuilder, cdef: ClassDef, fdef: FuncDef) -> None
     # children.
     if class_ir.allow_interpreted_subclasses:
         f = gen_glue(builder, func_ir.sig, func_ir, class_ir, class_ir, fdef, do_py_ops=True)
-        class_ir.glue_methods[(class_ir, name)] = f
+        # Use func_ir.decl.name (unique) rather than fdef.name, because for properties
+        # the getter and setter share the same fdef.name but have distinct decl names
+        # (e.g. "sql" vs "__mypyc_setter__sql"). Using fdef.name would cause the setter's
+        # glue to overwrite the getter's glue in the shadow vtable.
+        class_ir.glue_methods[(class_ir, func_ir.decl.name)] = f
         builder.functions.append(f)
 
     if fdef.name == "__getattr__":
@@ -649,6 +653,8 @@ def gen_glue(
     """
     if fdef.is_property:
         return gen_glue_property(builder, base_sig, target, cls, base, fdef.line, do_py_ops)
+    if do_py_ops and target.name.startswith("__mypyc_setter__"):
+        return gen_glue_property_setter(builder, base_sig, target, cls, base, fdef.line)
     else:
         return gen_glue_method(builder, base_sig, target, cls, base, fdef.line, do_py_ops)
 
@@ -837,6 +843,64 @@ def gen_glue_property(
             FuncSignature([rt_arg], return_type),
         ),
         args,
+        blocks,
+    )
+
+
+def gen_glue_property_setter(
+    builder: IRBuilder,
+    sig: FuncSignature,
+    target: FuncIR,
+    cls: ClassIR,
+    base: ClassIR,
+    line: int,
+) -> FuncIR:
+    """Generate a shadow glue method for a property setter.
+
+    For interpreted subclasses, property setters can't be called via
+    __mypyc_setter__<name> (that's an internal name). Instead, use
+    Python's setattr to set the property via the standard protocol.
+    """
+    builder.enter()
+    builder.ret_types[-1] = sig.ret_type
+
+    rt_args = list(sig.args)
+    rt_args[0] = RuntimeArg(sig.args[0].name, RInstance(cls))
+
+    arg_info = get_args(builder, rt_args, line)
+    args = arg_info.args
+
+    self_arg = args[0]
+    value_arg = args[1]
+
+    # Extract the property name from "__mypyc_setter__<name>"
+    # mypyc encodes e.g. "_chunks" as "__mypyc_setter___3_chunks"
+    prop_name = target.name[len("__mypyc_setter__"):]
+    # Decode mypyc's private name mangling: "_3_foo" -> "_foo", "_3foo" -> "_foo"
+    if prop_name.startswith("_") and len(prop_name) > 1 and prop_name[1].isdigit():
+        end_of_digits = 2
+        while end_of_digits < len(prop_name) and prop_name[end_of_digits].isdigit():
+            end_of_digits += 1
+        prop_name = "_" + prop_name[end_of_digits:]
+
+    builder.primitive_op(
+        py_setattr_op,
+        [self_arg, builder.load_str(prop_name), builder.coerce(value_arg, object_rprimitive, line)],
+        line,
+    )
+    # Return 1 (success). If py_setattr_op failed, the Python exception is set
+    # and the caller's error checking will handle it.
+    builder.add(Return(Integer(1, sig.ret_type, line)))
+
+    arg_regs, _, blocks, return_type, _ = builder.leave()
+    return FuncIR(
+        FuncDecl(
+            target.name + "__" + base.name + "_glue",
+            cls.name,
+            builder.module_name,
+            FuncSignature(rt_args, return_type),
+        ),
+        arg_regs,
         blocks,
     )
 

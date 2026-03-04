@@ -1399,7 +1399,7 @@ class IRBuilder:
         if always_defined:
             self.fn_info.env_class.attrs_with_defaults.add(name)
         if base._curr_env_reg is None:
-            return None  # type: ignore[return-value]
+            return
         attr_target = AssignmentTargetAttr(base.curr_env_reg, name)
 
         if reassign:
