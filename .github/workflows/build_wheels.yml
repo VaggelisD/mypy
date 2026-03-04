@@ -2,10 +2,7 @@ name: Build and publish wheels
 
 on:
   push:
-    branches: ['release-*']
     tags: ['v*']
-  pull_request:
-    branches: ['release-*']
   workflow_dispatch:
 
 concurrency:
@@ -23,6 +20,8 @@ jobs:
       include: ${{ steps.set-matrix.outputs.include }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Install cibuildwheel and pypyp
         run: |
           pipx install cibuildwheel==3.3.1
@@ -31,21 +30,20 @@ jobs:
         run: |
           MATRIX=$(
             {
-              cibuildwheel --print-build-identifiers --platform linux --archs x86_64 \
+              cibuildwheel --config-file=cibuildwheel.toml --print-build-identifiers --platform linux --archs x86_64 \
               | pyp 'json.dumps({"only": x, "os": "ubuntu-latest"})' \
-              && cibuildwheel --print-build-identifiers --platform linux --archs aarch64 \
-              | pyp 'json.dumps({"only": x, "os": "ubuntu-24.04-arm"})' \
-              && cibuildwheel --print-build-identifiers --platform macos \
-              | pyp 'json.dumps({"only": x, "os": "macos-latest"})' \
-              && cibuildwheel --print-build-identifiers --platform windows \
-              | pyp 'json.dumps({"only": x, "os": "windows-latest"})' \
-              && cibuildwheel --print-build-identifiers --platform windows --archs ARM64 \
-              | pyp 'json.dumps({"only": x, "os": "windows-11-arm"})'
+              && cibuildwheel --config-file=cibuildwheel.toml --print-build-identifiers --platform linux --archs aarch64 \
+              | pyp 'json.dumps({"only": x, "os": "ubuntu-24.04-arm"})'
+              # Uncomment the following to build macOS and Windows wheels (uses paid CI minutes):
+              # && cibuildwheel --config-file=cibuildwheel.toml --print-build-identifiers --platform macos \
+              # | pyp 'json.dumps({"only": x, "os": "macos-latest"})' \
+              # && cibuildwheel --config-file=cibuildwheel.toml --print-build-identifiers --platform windows \
+              # | pyp 'json.dumps({"only": x, "os": "windows-latest"})' \
+              # && cibuildwheel --config-file=cibuildwheel.toml --print-build-identifiers --platform windows --archs ARM64 \
+              # | pyp 'json.dumps({"only": x, "os": "windows-11-arm"})'
             } | pyp 'json.dumps(list(map(json.loads, lines)))'
           )
           echo "include=$MATRIX" | tee -a $GITHUB_OUTPUT
-        env:
-          CIBW_ARCHS_MACOS: x86_64 arm64
 
   build_wheels:
     name: Build ${{ matrix.only }}
@@ -58,9 +56,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          persist-credentials: false
           submodules: recursive
       - uses: pypa/cibuildwheel@v3.3.1
         with:
+          config-file: cibuildwheel.toml
           only: ${{ matrix.only }}
       - uses: actions/upload-artifact@v4
         with:
@@ -74,6 +74,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          persist-credentials: false
           submodules: recursive
       - uses: actions/setup-python@v5
         with:

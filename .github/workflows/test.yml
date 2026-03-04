@@ -4,7 +4,6 @@ on:
   workflow_dispatch:
   push:
     branches: [main, master, 'release*']
-    tags: ['*']
   pull_request:
     paths-ignore:
     - 'docs/**'
@@ -65,25 +64,26 @@ jobs:
           toxenv: py
           tox_extra_args: "-n 4"
           test_mypyc: true
-        - name: Test suite with py314-windows-64
-          python: '3.14'
-          os: windows-latest
-          toxenv: py
-          tox_extra_args: "-n 4"
+        # Uncomment the following to run tests on Windows/macOS (uses paid CI minutes):
+        # - name: Test suite with py314-windows-64
+        #   python: '3.14'
+        #   os: windows-latest
+        #   toxenv: py
+        #   tox_extra_args: "-n 4"
 
         # - name: Test suite with py315-dev-ubuntu
         #   python: '3.15-dev'
-        #   os: ubuntu-24.04-arm
+        #   os: ubuntu-latest
         #   toxenv: py
         #   tox_extra_args: "-n 4"
         #   # allow_failure: true
         #   test_mypyc: true
 
-        - name: mypyc runtime tests with py313-macos
-          python: '3.13'
-          os: macos-latest
-          toxenv: py
-          tox_extra_args: "-n 3 mypyc/test/test_run.py mypyc/test/test_external.py"
+        # - name: mypyc runtime tests with py313-macos
+        #   python: '3.13'
+        #   os: macos-latest
+        #   toxenv: py
+        #   tox_extra_args: "-n 3 mypyc/test/test_run.py mypyc/test/test_external.py"
 
         - name: mypyc runtime tests with py310-ubuntu
           python: '3.10'
@@ -105,10 +105,10 @@ jobs:
           python: '3.9'
           os: ubuntu-latest
           toxenv: type
-        - name: Type check our own code (py39-windows-64)
-          python: '3.9'
-          os: windows-latest
-          toxenv: type
+        # - name: Type check our own code (py39-windows-64)
+        #   python: '3.9'
+        #   os: windows-latest
+        #   toxenv: type
 
           # We also run these checks with pre-commit in CI,
           # but it's useful to run them with tox too,
