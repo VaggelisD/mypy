@@ -23,6 +23,7 @@ class FuncInfo:
         is_decorated: bool = False,
         in_non_ext: bool = False,
         add_nested_funcs_to_env: bool = False,
+        is_comprehension_scope: bool = False,
     ) -> None:
         self.fitem = fitem
         self.name = name
@@ -49,6 +50,7 @@ class FuncInfo:
         self.is_decorated = is_decorated
         self.in_non_ext = in_non_ext
         self.add_nested_funcs_to_env = add_nested_funcs_to_env
+        self.is_comprehension_scope = is_comprehension_scope
 
         # TODO: add field for ret_type: RType = none_rprimitive
 

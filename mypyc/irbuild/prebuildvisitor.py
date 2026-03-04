@@ -4,9 +4,11 @@ from mypy.nodes import (
     AssignmentStmt,
     Block,
     Decorator,
+    DictionaryComprehension,
     Expression,
     FuncDef,
     FuncItem,
+    GeneratorExpr,
     Import,
     LambdaExpr,
     MemberExpr,
@@ -16,10 +18,35 @@ from mypy.nodes import (
     SymbolNode,
     Var,
 )
-from mypy.traverser import ExtendedTraverserVisitor
+from mypy.traverser import ExtendedTraverserVisitor, TraverserVisitor
 from mypy.types import Type
 from mypyc.errors import Errors
 from mypyc.irbuild.missingtypevisitor import MissingTypesVisitor
+
+
+class _LambdaChecker(TraverserVisitor):
+    found = False
+
+    def visit_lambda_expr(self, _o: LambdaExpr) -> None:
+        self.found = True
+
+
+def _comprehension_has_lambda(node: GeneratorExpr | DictionaryComprehension) -> bool:
+    """Check if a comprehension body contains a lambda.
+
+    Only checks the body expressions (left_expr/key/value and conditions),
+    not the sequences, since sequences are evaluated in the enclosing scope.
+    """
+    checker = _LambdaChecker()
+    if isinstance(node, GeneratorExpr):
+        node.left_expr.accept(checker)
+    else:
+        node.key.accept(checker)
+        node.value.accept(checker)
+    for conds in node.condlists:
+        for cond in conds:
+            cond.accept(checker)
+    return checker.found
 
 
 class PreBuildVisitor(ExtendedTraverserVisitor):
@@ -87,6 +114,14 @@ class PreBuildVisitor(ExtendedTraverserVisitor):
         self.current_file: MypyFile = current_file
 
         self.missing_types_visitor = MissingTypesVisitor(types)
+
+        # Synthetic FuncDef representing the module scope, created on demand
+        # when a comprehension at module/class level contains a lambda.
+        self._module_fitem: FuncDef | None = None
+
+        # Map comprehension AST nodes to synthetic FuncDefs representing
+        # their scope (only for comprehensions that contain lambdas).
+        self.comp_to_fitem: dict[GeneratorExpr | DictionaryComprehension, FuncDef] = {}
 
     def visit(self, o: Node) -> bool:
         if not isinstance(o, Import):
@@ -156,6 +191,57 @@ class PreBuildVisitor(ExtendedTraverserVisitor):
         self.funcs.append(func)
         super().visit_func(func)
         self.funcs.pop()
+
+    def _visit_comprehension_with_scope(
+        self, o: GeneratorExpr | DictionaryComprehension
+    ) -> None:
+        """Visit a comprehension that contains lambdas.
+
+        Creates a synthetic FuncDef to represent the comprehension's scope,
+        registers it in the function nesting hierarchy, and traverses the
+        comprehension body with it on the stack. If at module level,
+        also pushes a synthetic module-level FuncDef first.
+        """
+        pushed_module = False
+        if not self.funcs:
+            # At module level: push synthetic module FuncDef
+            if self._module_fitem is None:
+                self._module_fitem = FuncDef("__mypyc_module__")
+                self._module_fitem.line = 1
+            self.funcs.append(self._module_fitem)
+            pushed_module = True
+
+        # Create synthetic FuncDef for the comprehension scope
+        comp_fdef = FuncDef(f"__comprehension_{o.line}__")
+        comp_fdef.line = o.line
+        self.comp_to_fitem[o] = comp_fdef
+
+        # Register as nested within enclosing function
+        self.encapsulating_funcs.setdefault(self.funcs[-1], []).append(comp_fdef)
+        self.nested_funcs[comp_fdef] = self.funcs[-1]
+
+        # Push and traverse
+        self.funcs.append(comp_fdef)
+        if isinstance(o, GeneratorExpr):
+            super().visit_generator_expr(o)
+        else:
+            super().visit_dictionary_comprehension(o)
+        self.funcs.pop()
+
+        if pushed_module:
+            self.funcs.pop()
+
+    def visit_generator_expr(self, o: GeneratorExpr) -> None:
+        if _comprehension_has_lambda(o):
+            self._visit_comprehension_with_scope(o)
+        else:
+            super().visit_generator_expr(o)
+
+    def visit_dictionary_comprehension(self, o: DictionaryComprehension) -> None:
+        if _comprehension_has_lambda(o):
+            self._visit_comprehension_with_scope(o)
+        else:
+            super().visit_dictionary_comprehension(o)
 
     def visit_import(self, imp: Import) -> None:
         if self._current_import_group is not None:
