@@ -7,7 +7,7 @@ requires = [
     # the following is from mypy-requirements.txt/setup.py
     "typing_extensions>=4.6.0",
     "mypy_extensions>=1.0.0",
-    "pathspec>=0.9.0",
+    "pathspec>=0.9.0,<1.0.0",
     "tomli>=1.1.0; python_version<'3.11'",
     "librt>=0.6.2; platform_python_implementation != 'PyPy'",
     # the following is from build-requirements.txt
@@ -17,7 +17,7 @@ requires = [
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "mypy"
+name = "sqlglot-mypy"
 description = "Optional static typing for Python"
 readme = {text = """
 Mypy -- Optional Static Typing for Python
@@ -52,7 +52,7 @@ dependencies = [
   # When changing this, also update build-system.requires and mypy-requirements.txt
   "typing_extensions>=4.6.0",
   "mypy_extensions>=1.0.0",
-  "pathspec>=0.9.0",
+  "pathspec>=0.9.0,<1.0.0",
   "tomli>=1.1.0; python_version<'3.11'",
   "librt>=0.6.2; platform_python_implementation != 'PyPy'",
 ]
@@ -67,11 +67,11 @@ install-types = ["pip"]
 faster-cache = ["orjson"]
 
 [project.urls]
-Homepage = "https://www.mypy-lang.org/"
+Homepage = "https://github.com/vaggelisd/sqlglot-mypy"
 Documentation = "https://mypy.readthedocs.io/en/stable/index.html"
-Repository = "https://github.com/python/mypy"
-Changelog = "https://github.com/python/mypy/blob/master/CHANGELOG.md"
-Issues = "https://github.com/python/mypy/issues"
+Repository = "https://github.com/vaggelisd/sqlglot-mypy"
+Changelog = "https://github.com/vaggelisd/sqlglot-mypy/blob/master/CHANGELOG.md"
+Issues = "https://github.com/vaggelisd/sqlglot-mypy/issues"
 
 [project.scripts]
 mypy = "mypy.__main__:console_entry"
