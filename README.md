@@ -91,6 +91,20 @@ When upstream releases a new version (e.g., 1.19.2):
 3. Cherry-pick or rebase fixes on top
 4. Set version to `1.19.2.post1` and release as above
 
+## CI/CD
+
+This fork ships **pure Python wheels only** — mypyc is a build tool and doesn't need to be compiled itself. This keeps CI fast (1 build job vs 10+ for compiled wheels).
+
+### Workflows
+
+- **`build_wheels.yml`** — Triggered on `v*` tags. Builds an sdist and a pure Python wheel (`py3-none-any`), then publishes to PyPI via trusted publishing.
+- **`test.yml`** — Triggered on pushes to `release*` branches and PRs. Runs:
+  - Full mypyc test suite (`mypyc/test/`) on Python 3.9–3.14 (6 jobs)
+  - Type check own code (`tox -e type`) on Python 3.9
+  - Lint and formatting (`tox -e lint`) on Python 3.10
+
+Upstream workflows not relevant to sqlglot-mypy (docs, mypy_primer, sync_typeshed, test_stubgenc) have been removed.
+
 ## Repository structure
 
 - **Upstream remote** (`origin`): `https://github.com/python/mypy.git`
