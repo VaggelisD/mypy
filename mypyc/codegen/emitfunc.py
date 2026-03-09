@@ -414,17 +414,19 @@ class FunctionEmitterVisitor(OpVisitor[None]):
             # For classes with allow_interpreted_subclasses, an interpreted subclass
             # may override class attributes in its class __dict__. The compiled code
             # reads from instance slots (which have the base class default), so we
-            # need to check if self is the exact compiled type. If not, fall back to
-            # Python's generic attribute lookup which respects the MRO.
+            # need to check if self is a compiled type with a known struct layout.
+            # If not, fall back to Python's generic attribute lookup which respects
+            # the MRO. We use the CPy_TPFLAGS_MYPYC_COMPILED flag (set on all
+            # mypyc-compiled types) so that compiled subclasses get direct struct
+            # access while only interpreted subclasses hit the slow path.
             use_fallback = cl.allow_interpreted_subclasses and not cl.is_trait
             if use_fallback:
-                type_struct = self.emitter.type_struct_name(cl)
                 fallback_attr = self.emitter.temp_name()
                 fallback_result = self.emitter.temp_name()
                 self.declarations.emit_line(f"PyObject *{fallback_attr};")
                 self.declarations.emit_line(f"PyObject *{fallback_result};")
                 self.emit_line(
-                    f"if (Py_TYPE({obj}) != (PyTypeObject *){type_struct}) {{"
+                    f"if (!(Py_TYPE({obj})->tp_flags & CPy_TPFLAGS_MYPYC_COMPILED)) {{"
                 )
                 self.emit_line(
                     f'{fallback_attr} = PyUnicode_FromString("{op.attr}");'

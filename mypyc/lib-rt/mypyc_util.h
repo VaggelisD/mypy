@@ -129,6 +129,11 @@ typedef PyObject CPyModule;
 // Error value for floats
 #define CPY_FLOAT_ERROR -113.0
 
+// Flag bit set on all mypyc-compiled types. Used to distinguish compiled
+// subclasses (safe for direct struct access) from interpreted subclasses
+// (need PyObject_GenericGetAttr fallback) in allow_interpreted_subclasses mode.
+#define CPy_TPFLAGS_MYPYC_COMPILED (1UL << 20)
+
 typedef void (*CPyVTableItem)(void);
 
 static inline CPyTagged CPyTagged_ShortFromInt(int x) {

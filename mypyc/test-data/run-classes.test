@@ -5758,3 +5758,75 @@ assert NonExtDict.BASE == {"x": 1}
 assert NonExtDict.EXTENDED == {"x": 1, "y": 2}
 
 assert NonExtChained.Z == {10, 20, 30}
+
+[case testCompiledSubclassAttrAccessWithAllowInterpretedSubclasses]
+# Test that compiled subclasses of a class with allow_interpreted_subclasses=True
+# can correctly access parent instance attributes via direct struct access
+# (not falling back to PyObject_GenericGetAttr).
+from mypy_extensions import mypyc_attr
+from typing import Any
+
+@mypyc_attr(allow_interpreted_subclasses=True)
+class Base:
+    def __init__(self, x: int, name: str) -> None:
+        self.x = x
+        self.name = name
+
+    def get_x(self) -> int:
+        return self.x
+
+    def get_name(self) -> str:
+        return self.name
+
+    def compute(self) -> int:
+        return self.x * 2
+
+@mypyc_attr(allow_interpreted_subclasses=True)
+class Child(Base):
+    def __init__(self, x: int, name: str, y: int) -> None:
+        super().__init__(x, name)
+        self.y = y
+
+    def compute(self) -> int:
+        # Access parent attr (self.x) from an overridden method
+        return self.x + self.y
+
+    def get_both(self) -> int:
+        # Access both parent and own attrs
+        return self.x + self.y
+
+@mypyc_attr(allow_interpreted_subclasses=True)
+class GrandChild(Child):
+    def __init__(self, x: int, name: str, y: int, z: int) -> None:
+        super().__init__(x, name, y)
+        self.z = z
+
+    def compute(self) -> int:
+        # Access grandparent attr from two levels down
+        return self.x + self.y + self.z
+
+def test_compiled_subclass_attr_access() -> None:
+    b = Base(10, "base")
+    assert b.get_x() == 10
+    assert b.get_name() == "base"
+    assert b.compute() == 20
+
+    c = Child(10, "child", 5)
+    assert c.get_x() == 10       # inherited method accessing parent attr
+    assert c.get_name() == "child"
+    assert c.compute() == 15     # overridden method accessing parent attr
+    assert c.get_both() == 15
+
+    g = GrandChild(10, "grand", 5, 3)
+    assert g.get_x() == 10       # inherited from grandparent
+    assert g.get_name() == "grand"
+    assert g.compute() == 18     # accessing attrs from all levels
+
+    # Also verify through base type reference (vtable dispatch)
+    ref: Base = Child(7, "ref", 3)
+    assert ref.get_x() == 7
+    assert ref.compute() == 10
+
+[file driver.py]
+from native import test_compiled_subclass_attr_access
+test_compiled_subclass_attr_access()
