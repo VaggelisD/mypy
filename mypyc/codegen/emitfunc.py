@@ -651,6 +651,24 @@ class FunctionEmitterVisitor(OpVisitor[None]):
             lib = self.emitter.get_group_prefix(method.decl)
             self.emit_line(f"{dest}{lib}{NATIVE_PREFIX}{method.cname(self.names)}({args});")
         else:
+            # For classes with allow_interpreted_subclasses where the method is
+            # not overridden by any compiled subclass, use a direct call guarded
+            # by a tp_flags check. Compiled instances get the fast direct call;
+            # interpreted subclasses fall back to the vtable.
+            use_guarded_direct = (
+                class_ir.allow_interpreted_subclasses
+                and not class_ir.is_trait
+                and class_ir.is_method_final_among_compiled(name)
+            )
+            if use_guarded_direct:
+                lib = self.emitter.get_group_prefix(method.decl)
+                direct_call = f"{lib}{NATIVE_PREFIX}{method.cname(self.names)}({args})"
+                self.emit_line(
+                    f"if (Py_TYPE({obj})->tp_flags & CPy_TPFLAGS_MYPYC_COMPILED) {{"
+                )
+                self.emit_line(f"{dest}{direct_call};")
+                self.emit_line("} else {")
+
             # Call using vtable.
             method_idx = rtype.method_index(name)
             self.emit_line(
@@ -666,6 +684,9 @@ class FunctionEmitterVisitor(OpVisitor[None]):
                     name,
                 )
             )
+
+            if use_guarded_direct:
+                self.emit_line("}")
 
     def visit_inc_ref(self, op: IncRef) -> None:
         if (
