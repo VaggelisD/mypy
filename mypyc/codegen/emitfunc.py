@@ -425,12 +425,8 @@ class FunctionEmitterVisitor(OpVisitor[None]):
                 fallback_result = self.emitter.temp_name()
                 self.declarations.emit_line(f"PyObject *{fallback_attr};")
                 self.declarations.emit_line(f"PyObject *{fallback_result};")
-                self.emit_line(
-                    f"if (!(Py_TYPE({obj})->tp_flags & CPy_TPFLAGS_MYPYC_COMPILED)) {{"
-                )
-                self.emit_line(
-                    f'{fallback_attr} = PyUnicode_FromString("{op.attr}");'
-                )
+                self.emit_line(f"if (!(Py_TYPE({obj})->tp_flags & CPy_TPFLAGS_MYPYC_COMPILED)) {{")
+                self.emit_line(f'{fallback_attr} = PyUnicode_FromString("{op.attr}");')
                 self.emit_line(
                     f"{fallback_result} = PyObject_GenericGetAttr((PyObject *){obj}, {fallback_attr});"
                 )
@@ -641,7 +637,9 @@ class FunctionEmitterVisitor(OpVisitor[None]):
         obj_args = (
             []
             if method.decl.kind == FUNC_STATICMETHOD
-            else [f"(PyObject *)Py_TYPE({obj})"] if method.decl.kind == FUNC_CLASSMETHOD else [obj]
+            else [f"(PyObject *)Py_TYPE({obj})"]
+            if method.decl.kind == FUNC_CLASSMETHOD
+            else [obj]
         )
         args = ", ".join(obj_args + [self.reg(arg) for arg in op_args])
         mtype = native_function_type(method, self.emitter)
@@ -663,9 +661,7 @@ class FunctionEmitterVisitor(OpVisitor[None]):
             if use_guarded_direct:
                 lib = self.emitter.get_group_prefix(method.decl)
                 direct_call = f"{lib}{NATIVE_PREFIX}{method.cname(self.names)}({args})"
-                self.emit_line(
-                    f"if (Py_TYPE({obj})->tp_flags & CPy_TPFLAGS_MYPYC_COMPILED) {{"
-                )
+                self.emit_line(f"if (Py_TYPE({obj})->tp_flags & CPy_TPFLAGS_MYPYC_COMPILED) {{")
                 self.emit_line(f"{dest}{direct_call};")
                 self.emit_line("} else {")
 
