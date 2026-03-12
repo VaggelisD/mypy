@@ -360,6 +360,43 @@ class ClassIR:
                 result.update(child_subs)
         return result
 
+    def compiled_subclasses(self) -> set[ClassIR] | None:
+        """Return all known compiled subclasses, ignoring allow_interpreted_subclasses.
+
+        Unlike subclasses(), this does not return None just because
+        allow_interpreted_subclasses is set. It still returns None if
+        children is None (separate compilation).
+        """
+        if self.children is None:
+            return None
+        result = set(self.children)
+        for child in self.children:
+            if child.children:
+                child_subs = child.compiled_subclasses()
+                if child_subs is None:
+                    return None
+                result.update(child_subs)
+        return result
+
+    def is_method_final_among_compiled(self, name: str) -> bool:
+        """Check if a method is not overridden by any known compiled subclass.
+
+        This is used for classes with allow_interpreted_subclasses to enable
+        direct calls guarded by a tp_flags check. The direct call is safe for
+        all compiled instances; interpreted subclasses fall back to the vtable.
+        """
+        subs = self.compiled_subclasses()
+        if subs is None:
+            return False
+
+        if not self.has_method(name):
+            # Method not defined on this class; final only if no subclass introduces it.
+            return not any(subc.has_method(name) for subc in subs)
+
+        # Method defined on this class; final only if no subclass overrides it.
+        method_decl = self.method_decl(name)
+        return all(subc.method_decl(name) == method_decl for subc in subs)
+
     def concrete_subclasses(self) -> list[ClassIR] | None:
         """Return all concrete (i.e. non-trait and non-abstract) subclasses.
 
