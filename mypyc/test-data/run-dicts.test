@@ -314,6 +314,45 @@ def test_dict_empty_collection_setdefault() -> None:
     assert d3['b'] == {'b', 'c'}
     assert d3.setdefault('c', set('d')) == {'d'}
 
+[case testDictPop]
+from typing import Dict
+
+def test_dict_pop_with_default() -> None:
+    d: Dict[str, int] = {'a': 1, 'b': 2, 'c': 3}
+    # Pop existing keys
+    assert d.pop('a', 0) == 1
+    assert 'a' not in d
+    assert d.pop('b', 0) == 2
+    # Pop missing key returns default
+    assert d.pop('missing', 99) == 99
+    assert d == {'c': 3}
+
+def test_dict_pop_no_default() -> None:
+    d: Dict[str, int] = {'a': 1, 'b': 2}
+    assert d.pop('a') == 1
+    assert 'a' not in d
+    # Pop missing key without default raises KeyError
+    try:
+        d.pop('missing')
+        assert False, "should have raised KeyError"
+    except KeyError:
+        pass
+    assert d == {'b': 2}
+
+def test_dict_pop_empty() -> None:
+    d: Dict[str, int] = {}
+    assert d.pop('x', 42) == 42
+    try:
+        d.pop('x')
+        assert False
+    except KeyError:
+        pass
+[file driver.py]
+from native import test_dict_pop_with_default, test_dict_pop_no_default, test_dict_pop_empty
+test_dict_pop_with_default()
+test_dict_pop_no_default()
+test_dict_pop_empty()
+
 [case testDictToBool]
 from typing import Dict, List
 

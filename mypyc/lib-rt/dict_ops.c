@@ -424,6 +424,62 @@ tuple_T4CIOO CPyDict_NextItem(PyObject *dict_or_iter, CPyTagged offset) {
     return ret;
 }
 
+static PyObject *CPyDict_PopSlow(PyObject *dict, PyObject *key, PyObject *fallback) {
+    // Fallback for dict subclasses: call the method to respect overrides.
+    PyObject *name = PyUnicode_InternFromString("pop");
+    if (name == NULL) {
+        return NULL;
+    }
+    PyObject *result;
+    if (fallback == NULL) {
+        result = PyObject_CallMethodOneArg(dict, name, key);
+    } else {
+        result = PyObject_CallMethodObjArgs(dict, name, key, fallback, NULL);
+    }
+    Py_DECREF(name);
+    return result;
+}
+
+PyObject *CPyDict_Pop(PyObject *dict, PyObject *key, PyObject *fallback) {
+    if (PyDict_CheckExact(dict)) {
+        PyObject *res = PyDict_GetItemWithError(dict, key);
+        if (res) {
+            Py_INCREF(res);
+            if (PyDict_DelItem(dict, key) < 0) {
+                Py_DECREF(res);
+                return NULL;
+            }
+            return res;
+        }
+        if (PyErr_Occurred()) {
+            return NULL;
+        }
+        Py_INCREF(fallback);
+        return fallback;
+    }
+    return CPyDict_PopSlow(dict, key, fallback);
+}
+
+PyObject *CPyDict_PopWithNone(PyObject *dict, PyObject *key) {
+    if (PyDict_CheckExact(dict)) {
+        PyObject *res = PyDict_GetItemWithError(dict, key);
+        if (res) {
+            Py_INCREF(res);
+            if (PyDict_DelItem(dict, key) < 0) {
+                Py_DECREF(res);
+                return NULL;
+            }
+            return res;
+        }
+        if (PyErr_Occurred()) {
+            return NULL;
+        }
+        PyErr_SetObject(PyExc_KeyError, key);
+        return NULL;
+    }
+    return CPyDict_PopSlow(dict, key, NULL);
+}
+
 int CPyMapping_Check(PyObject *obj) {
     return Py_TYPE(obj)->tp_flags & Py_TPFLAGS_MAPPING;
 }
