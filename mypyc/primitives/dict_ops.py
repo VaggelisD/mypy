@@ -164,6 +164,24 @@ dict_get_method_with_none = method_op(
     error_kind=ERR_MAGIC,
 )
 
+# dict.pop(key, default)
+method_op(
+    name="pop",
+    arg_types=[dict_rprimitive, object_rprimitive, object_rprimitive],
+    return_type=object_rprimitive,
+    c_function_name="CPyDict_Pop",
+    error_kind=ERR_MAGIC,
+)
+
+# dict.pop(key)
+method_op(
+    name="pop",
+    arg_types=[dict_rprimitive, object_rprimitive],
+    return_type=object_rprimitive,
+    c_function_name="CPyDict_PopWithNone",
+    error_kind=ERR_MAGIC,
+)
+
 # dict.setdefault(key, default)
 dict_setdefault_op = method_op(
     name="setdefault",

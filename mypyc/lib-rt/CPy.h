@@ -688,6 +688,8 @@ PyObject *CPyDict_GetItem(PyObject *dict, PyObject *key);
 int CPyDict_SetItem(PyObject *dict, PyObject *key, PyObject *value);
 PyObject *CPyDict_Get(PyObject *dict, PyObject *key, PyObject *fallback);
 PyObject *CPyDict_GetWithNone(PyObject *dict, PyObject *key);
+PyObject *CPyDict_Pop(PyObject *dict, PyObject *key, PyObject *fallback);
+PyObject *CPyDict_PopWithNone(PyObject *dict, PyObject *key);
 PyObject *CPyDict_SetDefault(PyObject *dict, PyObject *key, PyObject *value);
 PyObject *CPyDict_SetDefaultWithNone(PyObject *dict, PyObject *key);
 PyObject *CPyDict_SetDefaultWithEmptyDatatype(PyObject *dict, PyObject *key, int data_type);
