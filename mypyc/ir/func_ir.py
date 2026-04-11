@@ -181,6 +181,10 @@ class FuncDecl:
         # If True, only direct C level calls are supported (no wrapper function)
         self.internal = internal
 
+        # If True, this function is compiled via rawc and the method table should
+        # point to the rawc wrapper instead of the mypyc wrapper.
+        self.rawc_export = False
+
         # This is optional because this will be set to the line number when the corresponding
         # FuncIR is created
         self._line: int | None = None

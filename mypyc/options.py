@@ -20,6 +20,7 @@ class CompilerOptions:
         depends_on_librt_internal: bool = False,
         experimental_features: bool = False,
         strict_traceback_checks: bool = False,
+        rawc: bool = False,
     ) -> None:
         self.strip_asserts = strip_asserts
         self.multi_file = multi_file
@@ -73,3 +74,10 @@ class CompilerOptions:
         # tests to make sure that no new code which leads to incorrect tracebacks is
         # added.
         self.strict_traceback_checks = strict_traceback_checks
+        # If enabled, generate raw C code without Python C API dependency.
+        # Uses arena allocator for memory. Only functions marked with
+        # @mypyc_attr(rawc_export=True) get Python wrapper functions.
+        self.rawc = rawc
+        # Set of "ClassName.method_name" strings marking functions compiled via rawc.
+        # Set by mypycify() when rawc_modules is specified.
+        self.rawc_export_names: set[str] = set()

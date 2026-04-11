@@ -1,0 +1,1633 @@
+"""Pure C code generation for mypyc.
+
+Generates plain C code from IR without any Python C API dependency.
+Uses arena allocator for memory. Only functions explicitly
+marked as exported get Python wrapper functions.
+"""
+
+from __future__ import annotations
+
+from typing import Any, ClassVar
+
+from mypyc.codegen.emitfunc import encode_c_string_literal
+from mypyc.common import REG_PREFIX
+from mypyc.ir.func_ir import FuncDecl, FuncIR, all_values
+from mypyc.ir.module_ir import ModuleIR
+from mypyc.ir.ops import (
+    Assign,
+    AssignMulti,
+    BasicBlock,
+    Box,
+    Branch,
+    Call,
+    CallC,
+    Cast,
+    ComparisonOp,
+    ControlOp,
+    CString,
+    DecRef,
+    Extend,
+    Float,
+    FloatComparisonOp,
+    FloatNeg,
+    FloatOp,
+    GetAttr,
+    GetElement,
+    GetElementPtr,
+    Goto,
+    IncRef,
+    InitStatic,
+    Integer,
+    IntOp,
+    KeepAlive,
+    LoadAddress,
+    LoadErrorValue,
+    LoadGlobal,
+    LoadLiteral,
+    LoadMem,
+    LoadStatic,
+    MethodCall,
+    OpVisitor,
+    PrimitiveOp,
+    RaiseStandardError,
+    Register,
+    Return,
+    SetAttr,
+    SetElement,
+    SetMem,
+    Truncate,
+    TupleGet,
+    TupleSet,
+    Unborrow,
+    Unbox,
+    Unreachable,
+    Value,
+)
+from mypyc.ir.pprint import generate_names_for_ir
+from mypyc.ir.rtypes import (
+    RArray,
+    RInstance,
+    RTuple,
+    RType,
+    RUnion,
+    RVoid,
+    is_bool_or_bit_rprimitive,
+    is_bytearray_rprimitive,
+    is_bytes_rprimitive,
+    is_dict_rprimitive,
+    is_float_rprimitive,
+    is_frozenset_rprimitive,
+    is_int64_rprimitive,
+    is_int_rprimitive,
+    is_list_rprimitive,
+    is_none_rprimitive,
+    is_object_rprimitive,
+    is_pointer_rprimitive,
+    is_range_rprimitive,
+    is_set_rprimitive,
+    is_short_int_rprimitive,
+    is_str_rprimitive,
+    is_tagged,
+    is_tuple_rprimitive,
+)
+
+# Pure C name prefix (replaces CPyDef_ / CPyRawc_)
+PUREC_PREFIX = "rawc_"
+
+
+def rawc_ctype(rtype: RType) -> str:
+    """Map an RType to its C type string for raw C mode."""
+    # All Python container types → intptr_t in raw C
+    if (
+        is_dict_rprimitive(rtype)
+        or is_list_rprimitive(rtype)
+        or is_set_rprimitive(rtype)
+        or is_tuple_rprimitive(rtype)
+        or is_bytes_rprimitive(rtype)
+        or is_range_rprimitive(rtype)
+        or is_frozenset_rprimitive(rtype)
+        or is_bytearray_rprimitive(rtype)
+    ):
+        return "intptr_t"
+    if is_str_rprimitive(rtype):
+        # In mypyc IR, str is used for both full strings and single chars.
+        # Use intptr_t so it can hold either a const char* or a byte value.
+        # Function parameter types are handled separately in rawc_function_header.
+        return "intptr_t"
+    if is_int_rprimitive(rtype) or is_short_int_rprimitive(rtype):
+        # CPyTagged in standard mode, but in raw C we use int64_t
+        return "int64_t"
+    if is_object_rprimitive(rtype):
+        return "intptr_t"
+    # rawc_int (used by CPyStr_Size_size_t result) → int64_t
+    if rtype.name == "rawc_int":
+        return "int64_t"
+    # RInstance (compiled classes) → intptr_t in raw C
+    if isinstance(rtype, RInstance):
+        return "intptr_t"
+    if isinstance(rtype, RUnion):
+        return "intptr_t"
+    if isinstance(rtype, RTuple):
+        return rtype.struct_name
+    # Catch-all: if the C type would be PyObject * or void *, use intptr_t instead
+    ctype = rtype._ctype
+    if "PyObject" in ctype or ctype == "void *":
+        return "intptr_t"
+    return ctype
+
+
+def rawc_ctype_spaced(rtype: RType) -> str:
+    """Like rawc_ctype but with trailing space for non-pointer types."""
+    ctype = rawc_ctype(rtype)
+    if ctype[-1] == "*":
+        return ctype
+    return ctype + " "
+
+
+def rawc_function_name(fn: FuncDecl) -> str:
+    """Generate a raw C function name."""
+    # Use module_name__func_name pattern
+    parts = fn.fullname.split(".")
+    return PUREC_PREFIX + "__".join(parts)
+
+
+def rawc_function_header(fn: FuncDecl) -> str:
+    """Generate C function header for a raw C function."""
+    args = []
+    for arg in fn.sig.args:
+        if is_str_rprimitive(arg.type):
+            args.append(f"intptr_t {REG_PREFIX}{arg.name}")
+        else:
+            args.append(f"{rawc_ctype_spaced(arg.type)}{REG_PREFIX}{arg.name}")
+    return "{ret}{name}({args})".format(
+        ret=rawc_ctype_spaced(fn.sig.ret_type),
+        name=rawc_function_name(fn),
+        args=", ".join(args) or "void",
+    )
+
+
+def generate_rawc_c_for_module(module: ModuleIR, is_primary: bool = True) -> str:
+    """Generate complete raw C source file for a module.
+
+    Args:
+        module: The module IR to generate code for.
+        is_primary: If True, emit global definitions (rawc_module_globals,
+            RAWC_COMPAT_IMPL arrays). Only one module in a multi-module
+            build should be primary to avoid duplicate symbols.
+    """
+    lines: list[str] = []
+
+    # File header
+    lines.append("/* Generated by mypyc raw C mode -- do not edit */")
+    lines.append("")
+    if is_primary:
+        lines.append("#define RAWC_RT_IMPL")
+    lines.append('#include "rawc_rt.h"')
+    if is_primary:
+        lines.append("#define RAWC_COMPAT_IMPL")
+    lines.append('#include "rawc_compat.h"')
+    lines.append("#include <stdint.h>")
+    lines.append("#include <stdbool.h>")
+    lines.append("#include <string.h>")
+    lines.append("#include <ctype.h>")
+    lines.append("")
+
+    # Tuple struct declarations (deduplicated across all functions)
+    seen_tuples: set[str] = set()
+    for fn in module.functions:
+        if fn.name == "__top_level__":
+            continue
+        decl = generate_rawc_tuple_decls(fn, seen_tuples)
+        if decl:
+            lines.append(decl)
+
+    # Module globals dict (for module-level variables like _DIGIT_CHARS)
+    if is_primary:
+        lines.append("Rawc_Dict rawc_module_globals;")
+    else:
+        lines.append("extern Rawc_Dict rawc_module_globals;")
+    lines.append("")
+
+    # Forward declarations
+    for fn in module.functions:
+        lines.append(f"{rawc_function_header(fn.decl)};")
+    lines.append("")
+
+    # Class constructors: allocate + call __init__
+    for cls in module.classes:
+        init_fn = cls.get_method("__init__")
+        if not init_fn:
+            continue
+        n_attrs = len(cls.attributes)
+        ctor_name = rawc_function_name(init_fn.decl).replace("____init__", "")
+        init_name = rawc_function_name(init_fn.decl)
+        # Build parameter list (skip 'self')
+        params = []
+        args = []
+        for arg in init_fn.decl.sig.args[1:]:  # skip self
+            if is_str_rprimitive(arg.type):
+                params.append(f"intptr_t {REG_PREFIX}{arg.name}")
+            else:
+                params.append(f"{rawc_ctype_spaced(arg.type)}{REG_PREFIX}{arg.name}")
+            args.append(f"{REG_PREFIX}{arg.name}")
+        param_str = ", ".join(params) if params else "void"
+        arg_str = ", ".join(["self"] + args)
+        lines.append(f"static inline intptr_t {ctor_name}({param_str}) {{")
+        lines.append(f"    intptr_t self = Rawc_AllocInstance({n_attrs});")
+        lines.append(f"    {init_name}({arg_str});")
+        lines.append("    return self;")
+        lines.append("}")
+        lines.append("")
+
+    # Function bodies
+    for fn in module.functions:
+        # Skip module top-level init function
+        if fn.name == "__top_level__":
+            continue
+        body = generate_rawc_function(fn)
+        lines.append(body)
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def generate_rawc_tuple_decls(fn: FuncIR, seen: set[str] | None = None) -> str:
+    """Generate C struct declarations for any RTuple types used in this function."""
+    if seen is None:
+        seen = set()
+    decls: list[str] = []
+
+    all_types = [fn.ret_type] + [a.type for a in fn.args]
+    for r in all_values(fn.arg_regs, fn.blocks):
+        all_types.append(r.type)
+
+    for rtype in all_types:
+        if isinstance(rtype, RTuple) and rtype.struct_name not in seen:
+            seen.add(rtype.struct_name)
+            fields = []
+            for i, item_type in enumerate(rtype.types):
+                fields.append(f"    {rawc_ctype(item_type)} f{i};")
+            decls.append(f"#ifndef MYPYC_DECLARED_{rtype.struct_name}")
+            decls.append(f"#define MYPYC_DECLARED_{rtype.struct_name}")
+            decls.append(f"typedef struct {rtype.struct_name} {{")
+            decls.extend(fields)
+            decls.append(f"}} {rtype.struct_name};")
+            decls.append("#endif")
+            decls.append("")
+
+    return "\n".join(decls)
+
+
+def generate_rawc_function(fn: FuncIR) -> str:
+    """Generate raw C code for a single function."""
+    names = generate_names_for_ir(fn.arg_regs, fn.blocks)
+    fragments: list[str] = []
+
+    # Function header
+    fragments.append(f"{rawc_function_header(fn.decl)} {{")
+
+    # Local variable declarations
+    for r in all_values(fn.arg_regs, fn.blocks):
+        if isinstance(r.type, RArray):
+            continue
+        if r in fn.arg_regs:
+            continue
+        ctype = rawc_ctype_spaced(r.type)
+        fragments.append(f"    {ctype}{REG_PREFIX}{names[r]};")
+
+    # Label blocks
+    for i, block in enumerate(fn.blocks):
+        block.label = i
+
+    # Determine which blocks need labels
+    for block in fn.blocks:
+        terminator = block.terminator
+        assert isinstance(terminator, ControlOp), terminator
+        for target in terminator.targets():
+            is_next_block = target.label == block.label + 1
+            if not is_next_block:
+                fn.blocks[target.label].referenced = True
+
+    # Find CPy_CatchError blocks — these are exception handler entry points.
+    # Mark them as referenced so labels are emitted.
+    catch_label: int | None = None
+    catch_block_label: int = len(fn.blocks)
+    for block in fn.blocks:
+        for op in block.ops:
+            if isinstance(op, CallC) and op.function_name == "CPy_CatchError":
+                block.referenced = True
+                catch_label = block.label
+                catch_block_label = block.label
+                break
+
+    # Emit blocks
+    visitor = RawcFunctionEmitter(names)
+    for i, block in enumerate(fn.blocks):
+        next_block = fn.blocks[i + 1] if i + 1 < len(fn.blocks) else None
+        visitor.next_block = next_block
+
+        # Emit label if needed
+        if block.label > 0 and block.referenced:
+            fragments.append(f"CPyL{block.label}: ;")
+
+        for op in block.ops:
+            line = op.accept(visitor)
+            if line:
+                fragments.append(f"    {line}")
+            # After calls that may raise, check rawc_error_flag and jump to catch block.
+            # The IR's IS_ERROR branch may have been stripped during lowering.
+            if isinstance(op, CallC) and op.function_name == "CPyLong_FromStrWithBase":
+                if catch_label is not None:
+                    fragments.append(
+                        f"    if (rawc_error_flag) {{ rawc_error_flag = 0; goto CPyL{catch_label}; }}"
+                    )
+            # For MethodCall/Call inside try blocks, wrap with local setjmp so longjmp
+            # from nested calls (e.g. _scan → _extract_string → CPy_Raise) lands here.
+            if (
+                isinstance(op, (MethodCall, Call))
+                and catch_label is not None
+                and block.label < catch_block_label
+            ):
+                call_line = fragments.pop()  # remove the call we just appended
+                fragments.append(
+                    "    { jmp_buf saved_jmp; memcpy(saved_jmp, rawc_error_jmp, sizeof(jmp_buf));"
+                )
+                fragments.append(
+                    f"    if (setjmp(rawc_error_jmp) != 0) {{ memcpy(rawc_error_jmp, saved_jmp, sizeof(jmp_buf)); rawc_error_flag = 0; goto CPyL{catch_label}; }}"
+                )
+                fragments.append(call_line)
+                fragments.append("    memcpy(rawc_error_jmp, saved_jmp, sizeof(jmp_buf)); }")
+
+    fragments.append("}")
+    return "\n".join(fragments)
+
+
+class RawcFunctionEmitter(OpVisitor[str]):
+    """Emit raw C code for individual IR operations.
+
+    Returns a C statement string for each op (or empty string to skip).
+    This is much simpler than the standard emitter since we don't need:
+    - Reference counting (arena allocator)
+    - Python exception handling
+    - Boxing/unboxing
+    - Traceback generation
+    """
+
+    def __init__(self, names: dict[Value, str]) -> None:
+        self.names = names
+        self.next_block: BasicBlock | None = None
+
+    def reg(self, value: Value) -> str:
+        """Convert a Value to its C representation."""
+        if isinstance(value, Integer):
+            val = value.value
+            if val == 0 and is_pointer_rprimitive(value.type):
+                return "0"
+            # In standard mypyc, int_rprimitive and short_int_rprimitive values
+            # are stored pre-tagged (value << 1). In rawc mode, ints are plain,
+            # so untag these constants.
+            if is_tagged(value.type):
+                val = val >> 1
+            s = str(val)
+            if val >= (1 << 31):
+                if val >= (1 << 63):
+                    s += "ULL"
+                else:
+                    s += "LL"
+            elif val == -(1 << 63):
+                s = "(-9223372036854775807LL - 1)"
+            elif val <= -(1 << 31):
+                s += "LL"
+            return s
+        elif isinstance(value, Float):
+            r = repr(value.value)
+            if r == "inf":
+                return "INFINITY"
+            elif r == "-inf":
+                return "-INFINITY"
+            elif r == "nan":
+                return "NAN"
+            return r
+        elif isinstance(value, CString):
+            return '"' + encode_c_string_literal(value.value) + '"'
+        else:
+            return REG_PREFIX + self.names[value]
+
+    def label(self, block: BasicBlock) -> str:
+        return f"CPyL{block.label}"
+
+    # ---- Control flow ----
+
+    def visit_goto(self, op: Goto) -> str:
+        if op.label is not self.next_block:
+            return f"goto {self.label(op.label)};"
+        return ""
+
+    def visit_branch(self, op: Branch) -> str:
+        true, false = op.true, op.false
+        negated = op.negated
+
+        if true is self.next_block and op.traceback_entry is None:
+            true, false = false, true
+            negated = not negated
+
+        neg = "!" if negated else ""
+
+        if op.op == Branch.BOOL:
+            val_type = op.value.type
+            if (
+                is_bool_or_bit_rprimitive(val_type)
+                or is_int_rprimitive(val_type)
+                or is_short_int_rprimitive(val_type)
+            ):
+                cond = f"{neg}{self.reg(op.value)}"
+            else:
+                # Use rawc_is_truthy for containers, strings, objects
+                cond = f"{neg}rawc_is_truthy({self.reg(op.value)})"
+        elif op.op == Branch.IS_ERROR:
+            # In raw C mode, we mostly skip error checks.
+            # For now, emit the comparison but it should rarely fire.
+            compare = "!=" if negated else "=="
+            error_val = self._c_error_value(op.value.type)
+            cond = f"{self.reg(op.value)} {compare} {error_val}"
+        else:
+            return f"/* unknown branch type {op.op} */"
+
+        if false is self.next_block:
+            return f"if ({cond}) goto {self.label(true)};"
+        else:
+            return f"if ({cond}) goto {self.label(true)}; else goto {self.label(false)};"
+
+    def _c_error_value(self, rtype: RType) -> str:
+        if is_int64_rprimitive(rtype):
+            return "-113LL"
+        elif is_float_rprimitive(rtype):
+            return "-113.0"
+        elif is_bool_or_bit_rprimitive(rtype):
+            return "2"
+        elif is_none_rprimitive(rtype):
+            return "2"
+        elif is_str_rprimitive(rtype):
+            return "0"  # NULL pointer = error for strings
+        else:
+            # For object/dict types (intptr_t): -1 or 0 as error
+            ctype = rawc_ctype(rtype)
+            if "int" in ctype:
+                return "-1"
+            return "0"
+
+    def visit_return(self, op: Return) -> str:
+        return f"return {self.reg(op.value)};"
+
+    def visit_unreachable(self, op: Unreachable) -> str:
+        return "__builtin_unreachable();"
+
+    # ---- Assignment ----
+
+    def visit_assign(self, op: Assign) -> str:
+
+        dest = self.reg(op.dest)
+        src = self.reg(op.src)
+        if dest != src:
+            # If assigning intptr_t to a tuple type, dereference the pointer
+            if isinstance(op.dest.type, RTuple) and not isinstance(op.src.type, RTuple):
+                struct_name = op.dest.type.struct_name
+                return f"{dest} = *({struct_name} *){src};"
+            return f"{dest} = {src};"
+        return ""
+
+    def visit_assign_multi(self, op: AssignMulti) -> str:
+        name = f"arr_{id(op)}"
+        # Store in names dict (reg() prepends REG_PREFIX)
+        self.names[op] = name
+        self.names[op.dest] = name
+        dest = f"{REG_PREFIX}{name}"
+        parts = []
+        for i, src in enumerate(op.src):
+            parts.append(f"{dest}[{i}] = {self.reg(src)};")
+        return f"intptr_t {dest}[{len(op.src)}]; " + " ".join(parts)
+
+    # ---- Literals / loads ----
+
+    def visit_load_error_value(self, op: LoadErrorValue) -> str:
+        dest = self.reg(op)
+        return f"{dest} = {self._c_error_value(op.type)};"
+
+    def visit_load_literal(self, op: LoadLiteral) -> str:
+        dest = self.reg(op)
+        val = op.value
+        if isinstance(val, bool):
+            return f"{dest} = {'1' if val else '0'};"
+        elif isinstance(val, int):
+            return f"{dest} = {val}LL;"
+        elif isinstance(val, float):
+            return f"{dest} = {repr(val)};"
+        elif isinstance(val, str):
+            if len(val) == 0:
+                return f"{dest} = RAWC_EMPTY_STR;"
+            elif len(val) == 1:
+                # Single char — use pre-built char_strings table (no alloc)
+                byte_val = ord(val)
+                return f"{dest} = (intptr_t)rawc_char_strings[{byte_val}];"
+            else:
+                escaped = (
+                    val.replace("\\", "\\\\")
+                    .replace('"', '\\"')
+                    .replace("\n", "\\n")
+                    .replace("\t", "\\t")
+                    .replace("\r", "\\r")
+                    .replace("'", "\\'")
+                )
+                byte_len = len(val.encode("utf-8"))
+                return f'{dest} = rawc_str_new("{escaped}", {byte_len});'
+        elif isinstance(val, bytes):
+            escaped = "".join(f"\\x{b:02x}" for b in val)
+            return f'{dest} = "{escaped}";'
+        elif val is None:
+            return f"{dest} = 0;"
+        raise NotImplementedError(f"rawc: unsupported load_literal type {type(val).__name__}")
+
+    # ---- Integer operations ----
+
+    # Tagged int range-check constants
+    _TAGGED_MAX = 4611686018427387903
+    _TAGGED_MIN = -4611686018427387904
+
+    def _is_tagged_int_type(self, rtype: RType) -> bool:
+        """Check if a type represents a Python int that uses CPyTagged in standard mypyc.
+
+        Only these types have tag/untag operations (<< 1, >> 1, & 1, ^ 1)
+        inserted by the IR. Other int types (uint32 for bitmaps, int32, etc.)
+        use their bit operations legitimately.
+        """
+        return (
+            is_int_rprimitive(rtype)
+            or is_short_int_rprimitive(rtype)
+            or is_int64_rprimitive(rtype)
+        )
+
+    def visit_int_op(self, op: IntOp) -> str:
+        dest = self.reg(op)
+        lhs = self.reg(op.lhs)
+        rhs = self.reg(op.rhs)
+        # Eliminate tagged int operations: rawc ints are plain int64, never tagged.
+        # The IR inserts << 1 (tag), >> 1 (untag), & 1 (tag check), and ^ 1
+        # (tag bit removal) around CPyTagged values. In rawc these are no-ops.
+        # Only eliminate for types that represent Python ints (int_rprimitive,
+        # short_int_rprimitive, int64_rprimitive). Other int types like
+        # uint32_rprimitive (used for default-arg bitmaps) have real bit ops.
+        if (
+            isinstance(op.rhs, Integer)
+            and op.rhs.value == 1
+            and self._is_tagged_int_type(op.lhs.type)
+        ):
+            if op.op in (IntOp.LEFT_SHIFT, IntOp.RIGHT_SHIFT):
+                return f"{dest} = {lhs};"
+            if op.op in (IntOp.AND, IntOp.XOR) and not is_bool_or_bit_rprimitive(op.lhs.type):
+                if op.op == IntOp.AND:
+                    return f"{dest} = 0;"
+                return f"{dest} = {lhs};"
+        if op.op == IntOp.RIGHT_SHIFT:
+            lhs = f"(int64_t){lhs}"
+            rhs = f"(int64_t){rhs}"
+        return f"{dest} = {lhs} {op.op_str[op.op]} {rhs};"
+
+    def visit_comparison_op(self, op: ComparisonOp) -> str:
+        dest = self.reg(op)
+        lhs = self.reg(op.lhs)
+        rhs = self.reg(op.rhs)
+        # Short-circuit tagged range checks: in raw C, all i64 values
+        # "fit" in tagged representation, so these checks are always true.
+        if isinstance(op.rhs, Integer) and op.rhs.value in (
+            self._TAGGED_MAX,
+            self._TAGGED_MIN,
+            self._TAGGED_MAX * 2,
+            self._TAGGED_MIN * 2,  # pre-doubled
+        ):
+            return f"{dest} = 1; /* tagged range check eliminated */"
+        if isinstance(op.lhs, Integer) and op.lhs.value in (
+            self._TAGGED_MAX,
+            self._TAGGED_MIN,
+            self._TAGGED_MAX * 2,
+            self._TAGGED_MIN * 2,
+        ):
+            return f"{dest} = 1; /* tagged range check eliminated */"
+        lhs_cast = ""
+        rhs_cast = ""
+        if op.op in (ComparisonOp.SLT, ComparisonOp.SGT, ComparisonOp.SLE, ComparisonOp.SGE):
+            lhs_cast = "(int64_t)"
+            rhs_cast = "(int64_t)"
+        return f"{dest} = {lhs_cast}{lhs} {op.op_str[op.op]} {rhs_cast}{rhs};"
+
+    # ---- Float operations ----
+
+    def visit_float_op(self, op: FloatOp) -> str:
+        dest = self.reg(op)
+        lhs = self.reg(op.lhs)
+        rhs = self.reg(op.rhs)
+        if op.op != FloatOp.MOD:
+            return f"{dest} = {lhs} {op.op_str[op.op]} {rhs};"
+        else:
+            return f"{dest} = fmod({lhs}, {rhs});"
+
+    def visit_float_neg(self, op: FloatNeg) -> str:
+        return f"{self.reg(op)} = -{self.reg(op.src)};"
+
+    def visit_float_comparison_op(self, op: FloatComparisonOp) -> str:
+        dest = self.reg(op)
+        lhs = self.reg(op.lhs)
+        rhs = self.reg(op.rhs)
+        return f"{dest} = {lhs} {op.op_str[op.op]} {rhs};"
+
+    # ---- Function calls ----
+
+    def visit_call(self, op: Call) -> str:
+        dest = f"{self.reg(op)} = " if not is_none_rprimitive(op.type) else ""
+        args = ", ".join(self.reg(arg) for arg in op.args)
+        fname = rawc_function_name(op.fn)
+        return f"{dest}{fname}({args});"
+
+    def visit_method_call(self, op: MethodCall) -> str:
+        dest_prefix = ""
+        if not isinstance(op.type, RVoid) and op in self.names:
+            dest_prefix = f"{self.reg(op)} = "
+        obj = self.reg(op.obj)
+        rtype = op.obj.type
+        assert isinstance(rtype, RInstance), rtype
+        method = rtype.class_ir.get_method(op.method)
+        assert method is not None
+        args = ", ".join([obj] + [self.reg(arg) for arg in op.args])
+        fname = rawc_function_name(method.decl)
+        return f"{dest_prefix}{fname}({args});"
+
+    # ---- Reference counting (no-ops in raw C mode) ----
+
+    def visit_inc_ref(self, op: IncRef) -> str:
+        return ""  # Arena handles this
+
+    def visit_dec_ref(self, op: DecRef) -> str:
+        return ""  # Arena handles this
+
+    # ---- Boxing/unboxing ----
+
+    def visit_box(self, op: Box) -> str:
+        # In raw C mode, boxing converts unboxed → intptr_t
+        dest = self.reg(op)
+        src = self.reg(op.src)
+        if is_none_rprimitive(op.src.type):
+            return f"{dest} = 0; /* boxed None */"
+        return f"{dest} = (intptr_t){src};"
+
+    def visit_unbox(self, op: Unbox) -> str:
+
+        dest = self.reg(op)
+        src = self.reg(op.src)
+        if is_bool_or_bit_rprimitive(op.type):
+            return f"{dest} = (char){src};"
+        if isinstance(op.type, RTuple):
+            # Unbox object → tuple: dereference pointer to tuple struct
+            return f"{dest} = *({op.type.struct_name} *){src};"
+        return f"{dest} = {src};"
+
+    def visit_cast(self, op: Cast) -> str:
+
+        dest = self.reg(op)
+        src = self.reg(op.src)
+        if isinstance(op.type, RTuple) and not isinstance(op.src.type, RTuple):
+            struct_name = op.type.struct_name
+            return f"{dest} = *({struct_name} *){src};"
+        return f"{dest} = {src};"
+
+    # ---- Tuple operations ----
+
+    def visit_tuple_get(self, op: TupleGet) -> str:
+        dest = self.reg(op)
+        src = self.reg(op.src)
+        return f"{dest} = {src}.f{op.index};"
+
+    def visit_tuple_set(self, op: TupleSet) -> str:
+        dest = self.reg(op)
+        if len(op.items) == 0:
+            return f"{dest}.empty_struct_error_flag = 0;"
+        lines = []
+        for i, item in enumerate(op.items):
+            lines.append(f"{dest}.f{i} = {self.reg(item)};")
+        return " ".join(lines)
+
+    # ---- Truncate / extend ----
+
+    def visit_truncate(self, op: Truncate) -> str:
+        dest = self.reg(op)
+        src = self.reg(op.src)
+        target_type = rawc_ctype(op.type)
+        return f"{dest} = ({target_type}){src};"
+
+    def visit_extend(self, op: Extend) -> str:
+        dest = self.reg(op)
+        src = self.reg(op.src)
+        target_type = rawc_ctype(op.type)
+        if op.signed:
+            return f"{dest} = (int64_t)(int32_t){src};"
+        else:
+            return f"{dest} = ({target_type}){src};"
+
+    # ---- Memory operations ----
+
+    def visit_load_mem(self, op: LoadMem) -> str:
+        dest = self.reg(op)
+        src = self.reg(op.src)
+        target_type = rawc_ctype(op.type)
+        return f"{dest} = *({target_type} *){src};"
+
+    def visit_set_mem(self, op: SetMem) -> str:
+        dest = self.reg(op.dest)
+        src = self.reg(op.src)
+        dest_type = rawc_ctype(op.dest_type)
+        return f"*({dest_type} *){dest} = {src};"
+
+    def visit_get_element(self, op: GetElement) -> str:
+        dest = self.reg(op)
+        src = self.reg(op.src)
+        field = op.field
+        return f"{dest} = {src}.{field};"
+
+    def visit_get_element_ptr(self, op: GetElementPtr) -> str:
+        dest = self.reg(op)
+        src = self.reg(op.src)
+        target_type = rawc_ctype(op.type)
+        struct_name = op.src_type.name
+        field = op.field
+        # In raw C mode, PyVarObject.ob_size → Rawc_List.len
+        if struct_name == "PyVarObject" and field == "ob_size":
+            return f"{dest} = (intptr_t)&((Rawc_List *){src})->len;"
+        return f"{dest} = ({target_type})((char *){src} + __builtin_offsetof(struct {struct_name}, {field}));"
+
+    def visit_set_element(self, op: SetElement) -> str:
+        dest = self.reg(op)
+        src = self.reg(op.src)
+        field = op.field
+        val = self.reg(op.item)
+        return f"{dest} = {src}; {dest}.{field} = {val};"
+
+    def visit_load_address(self, op: LoadAddress) -> str:
+        dest = self.reg(op)
+        src = op.src
+        if src == "_Py_NoneStruct":
+            return f"{dest} = 0; /* None */"
+        if isinstance(src, Register):
+            return f"{dest} = (intptr_t){self.reg(src)}; /* &{src.name} */"
+        raise NotImplementedError(f"rawc: unhandled load_address {src}")
+
+    # ---- Stubs for ops that shouldn't appear in raw C mode ----
+
+    def visit_call_c(self, op: CallC) -> str:
+
+        fname = op.function_name
+        args = [self.reg(arg) for arg in op.args]
+
+        # Check if this op produces a value (has a destination register)
+        has_dest = not isinstance(op.type, RVoid) and op in self.names
+        dest = self.reg(op) if has_dest else "__rawc_void"
+
+        # ---- Pure C lowered string operations ----
+
+        if fname == "CPyTagged_FromInt64":
+            # In raw C mode, no tagging needed - just pass through
+            return f"{dest} = {args[0]};"
+
+        # ---- Standard CPy runtime calls - emit raw C equivalents ----
+
+        if fname == "CPyStr_GetItem":
+            str_arg = args[0]
+            idx_arg = args[1]
+            # UCS-4: index into uint32_t array, idx is tagged (>>1)
+            return f"{dest} = CPyStr_GetItemUnsafe({str_arg}, {idx_arg});"
+
+        if fname == "CPyStr_EqualLiteral":
+            ch_arg = args[0]
+            literal_arg = args[1]
+            # Both are UCS-4 strings — compare first code point
+            return f"{dest} = (((const uint32_t *)({ch_arg}))[0] == ((const uint32_t *)({literal_arg}))[0]);"
+
+        if fname == "CPyStr_Size_size_t":
+            str_arg = args[0]
+            return f"{dest} = rawc_strlen({str_arg});"
+
+        if fname == "PyObject_RichCompare":
+            a_arg = args[0]
+            b_arg = args[1]
+            op_code = args[2]
+            op_map = {"0": "<", "1": "<=", "2": "==", "3": "!=", "4": ">", "5": ">="}
+            op_str = op_map.get(op_code, "==")
+            # Both are UCS-4 strings — compare first code point
+            return f"{dest} = (intptr_t)(((const uint32_t *)({a_arg}))[0] {op_str} ((const uint32_t *)({b_arg}))[0]);"
+
+        # ---- Dict operations → Rawc_Dict ----
+
+        if fname == "PyDict_New":
+            return f"{dest} = (intptr_t)Rawc_Dict_New();"
+
+        if fname == "CPyDict_SetDefaultWithEmptyDatatype":
+            dict_arg = args[0]
+            key_arg = args[1]
+            return f"{dest} = (intptr_t)Rawc_Dict_SetDefault((Rawc_Dict *){dict_arg}, {key_arg});"
+
+        if fname == "CPyDict_SetItem":
+            dict_arg = args[0]
+            key_arg = args[1]
+            val_arg = args[2]
+            return f"if ({key_arg} == 0) Rawc_Dict_SetInt0((Rawc_Dict *){dict_arg}, {val_arg}); else Rawc_Dict_Set((Rawc_Dict *){dict_arg}, {key_arg}, {val_arg}); {dest} = 0;"
+
+        if fname == "CPyDict_GetItem":
+            dict_arg = args[0]
+            key_arg = args[1]
+            return f"{dest} = Rawc_Dict_Get((Rawc_Dict *){dict_arg}, {key_arg});"
+
+        if fname in ("PyDict_Contains", "PySet_Contains"):
+            dict_arg = args[0]
+            key_arg = args[1]
+            return f"if ({key_arg} == 0) {dest} = Rawc_Dict_ContainsInt0((Rawc_Dict *){dict_arg}); else {dest} = Rawc_Dict_Contains((Rawc_Dict *){dict_arg}, {key_arg});"
+
+        # ---- Iterator operations ----
+
+        if fname == "PyObject_GetIter":
+            # For strings: create a Rawc_StrIter
+            src_arg = args[0]
+            return f"{dest} = (intptr_t)({src_arg}); /* iter init: reuse str ptr, track pos in next */"
+
+        if fname == "PyIter_Next":
+            # For string iteration: read next char
+            # We store the iterator as {ptr_to_char_data, current_pos} packed
+            # Actually, we need persistent state. Use a GC-allocated StrIter.
+            iter_arg = args[0]
+            # UCS-4: read uint32_t, advance pointer by sizeof(uint32_t)
+            return f"{dest} = (intptr_t)((const uint32_t *){iter_arg})[0]; if ({dest} != 0) *(intptr_t *)&{iter_arg} += sizeof(uint32_t); else {dest} = -1; /* str iter next */"
+
+        if fname == "PyObject_IsTrue":
+            src_arg = args[0]
+            src_type = op.args[0].type
+            if is_str_rprimitive(src_type):
+                return f"{dest} = ({src_arg} != 0 && rawc_strlen({src_arg}) > 0) ? 1 : 0;"
+            elif is_set_rprimitive(src_type):
+                return f"{dest} = ({src_arg} != 0 && (((Rawc_Dict *){src_arg})->len + ((Rawc_Dict *){src_arg})->int0_set) > 0) ? 1 : 0;"
+            elif is_dict_rprimitive(src_type):
+                return f"{dest} = ({src_arg} != 0 && (((Rawc_Dict *){src_arg})->len + ((Rawc_Dict *){src_arg})->int0_set) > 0) ? 1 : 0;"
+            elif is_list_rprimitive(src_type):
+                return f"{dest} = ({src_arg} != 0 && ((Rawc_List *){src_arg})->len > 0) ? 1 : 0;"
+            else:
+                # Generic truthiness: non-zero pointer AND non-empty content
+                # For strings: check rawc_strlen; for containers: check PyDict_Size
+                # Use a helper that handles all types
+                return f"{dest} = rawc_is_truthy({src_arg});"
+
+        # ---- str() / repr() on boxed values ----
+
+        if fname == "PyObject_Str":
+            src_arg = args[0]
+            src_op = op.args[0]
+            if isinstance(src_op, Box) and is_int_rprimitive(src_op.src.type):
+                return f"{dest} = CPyTagged_Str({src_arg});"
+            if is_str_rprimitive(src_op.type):
+                return f"{dest} = {src_arg}; /* str(str) = identity */"
+            return f"{dest} = CPyTagged_Str({src_arg}); /* PyObject_Str fallback: assume int */"
+
+        # ---- Error/control ops ----
+
+        if fname == "PyObject_Vectorcall":
+            # In raise context: class_ptr(msg) — store msg and type for bridge
+            cls_arg = args[0]
+            arr_arg = args[1]
+            return f"rawc_error_msg = ((intptr_t *){arr_arg})[0]; rawc_error_type = {cls_arg}; {dest} = 0;"
+
+        if fname == "CPy_NoErrOccurred":
+            return f"{dest} = 1; /* no error checking in raw C mode */"
+
+        if fname == "CPyLong_FromStrWithBase":
+            all_args = ", ".join(args)
+            return f"{dest} = {fname}({all_args}); /* may set rawc_error_flag */"
+
+        # Fallback: emit raw call
+        all_args = ", ".join(args)
+        if is_none_rprimitive(op.type):
+            return f"{fname}({all_args});"
+        return f"{dest} = {fname}({all_args});"
+
+    def visit_primitive_op(self, op: PrimitiveOp) -> str:
+        raise NotImplementedError(f"rawc: unsupported primitive_op {op.desc.name}")
+
+    # Static enum value cache: populated by rawc_build before emitting
+    _enum_values: ClassVar[dict[str, int]] = {}
+
+    def visit_load_static(self, op: LoadStatic) -> str:
+        dest = self.reg(op)
+        identifier = op.identifier
+        # Module globals / builtins dict
+        if identifier in ("globals", "builtins"):
+            return f"{dest} = (intptr_t)&rawc_module_globals; /* {identifier} */"
+        # Look up enum value from cache
+        if identifier in self._enum_values:
+            val = self._enum_values[identifier]
+            return f"{dest} = {val}; /* {identifier} */"
+        raise NotImplementedError(f"rawc: unresolved load_static {identifier}")
+
+    def visit_init_static(self, op: InitStatic) -> str:
+        return f"/* init_static {op.identifier} */"
+
+    def visit_load_global(self, op: LoadGlobal) -> str:
+        raise NotImplementedError("rawc: unsupported load_global")
+
+    def _attr_index(self, class_type: RInstance, attr: str) -> int:
+        """Get the index of an attribute in the class struct layout."""
+        cls_ir = class_type.class_ir
+        for i, name in enumerate(cls_ir.attributes):
+            if name == attr:
+                return i
+        return -1
+
+    def visit_get_attr(self, op: GetAttr) -> str:
+        dest = self.reg(op)
+        obj = self.reg(op.obj)
+        attr = op.attr
+        cls_ir = op.class_type.class_ir
+
+        # Properties are methods — call the getter function
+        method = cls_ir.get_method(attr)
+        if method and attr not in cls_ir.attributes:
+            getter_name = rawc_function_name(method.decl)
+            return f"{dest} = {getter_name}({obj}); /* .{attr} (property) */"
+
+        idx = self._attr_index(op.class_type, attr)
+        ctype = rawc_ctype(op.type)
+        return f"{dest} = ({ctype})(((intptr_t *){obj})[{idx}]); /* .{attr} */"
+
+    def visit_set_attr(self, op: SetAttr) -> str:
+        obj = self.reg(op.obj)
+        attr = op.attr
+        src = self.reg(op.src)
+        idx = self._attr_index(op.class_type, attr)
+        if op in self.names:
+            dest = self.reg(op)
+            return (
+                f"((intptr_t *){obj})[{idx}] = (intptr_t)({src}); {dest} = 1; /* .{attr} = ... */"
+            )
+        return f"((intptr_t *){obj})[{idx}] = (intptr_t)({src}); /* .{attr} = ... */"
+
+    def visit_raise_standard_error(self, op: RaiseStandardError) -> str:
+        return "/* raise not supported in raw C mode */ abort();"
+
+    def visit_keep_alive(self, op: KeepAlive) -> str:
+        return ""  # No-op in raw C mode
+
+    def visit_unborrow(self, op: Unborrow) -> str:
+        dest = self.reg(op)
+        src = self.reg(op.src)
+        if dest == src:
+            return ""
+        return f"{dest} = {src};"
+
+
+def _find_rawc_exports(trees: list[Any]) -> set[str]:
+    """Scan mypy ASTs for @mypyc_attr(rawc_export=True) decorators.
+
+    Returns set of fully qualified function/method names to export.
+    """
+    from mypy.nodes import ClassDef, Decorator, FuncDef
+
+    exports: set[str] = set()
+
+    def _check_decorators(node: Decorator | FuncDef, prefix: str) -> None:
+        decs = node.decorators if isinstance(node, Decorator) else []
+        for dec in decs:
+            from mypyc.irbuild.util import get_mypyc_attr_call, get_mypyc_attr_literal
+
+            call = get_mypyc_attr_call(dec)
+            if call:
+                for name, arg in zip(call.arg_names, call.args):
+                    if name == "rawc_export":
+                        val = get_mypyc_attr_literal(arg)
+                        if val is True:
+                            exports.add(f"{prefix}.{node.name}" if prefix else node.name)
+
+    for tree in trees:
+        for defn in tree.defs:
+            if isinstance(defn, (Decorator, FuncDef)):
+                _check_decorators(defn, "")
+            elif isinstance(defn, ClassDef):
+                for stmt in defn.defs.body:
+                    if isinstance(stmt, (Decorator, FuncDef)):
+                        _check_decorators(stmt, defn.name)
+
+    return exports
+
+
+def generate_rawc_bridge_c(
+    module_irs: list[Any], export_names: set[str] | None = None, group_name: str = ""
+) -> str:
+    """Generate a Python↔C bridge for exported rawc functions.
+
+    Only functions/methods marked with @mypyc_attr(rawc_export=True)
+    get bridge wrappers. The bridge is linked into the mypyc shared library,
+    not compiled as a standalone module.
+
+    Args:
+        module_irs: List of ModuleIR objects (all compiled modules).
+        export_names: Set of function names to export (from _find_rawc_exports).
+                     Format: "func_name" for module-level, "ClassName.method_name" for methods.
+    """
+    if not export_names:
+        return ""
+
+    # Collect all exported functions/methods from all modules
+    exported_fns = []  # (module_ir, fn_ir, is_method, class_ir_or_None)
+    all_classes = []
+    all_module_names = []
+
+    for module_ir in module_irs:
+        if isinstance(module_ir, str):
+            continue
+        all_module_names.append(module_ir.fullname)
+        for cls in module_ir.classes:
+            if cls.is_ext_class:
+                all_classes.append(cls)
+            for method_name in cls.methods:
+                qualified = f"{cls.name}.{method_name}"
+                if qualified in export_names:
+                    method = cls.get_method(method_name)
+                    if method:
+                        exported_fns.append((module_ir, method, True, cls))
+        for fn in module_ir.functions:
+            if fn.name in export_names and fn.name != "__top_level__":
+                exported_fns.append((module_ir, fn, False, None))
+
+    if not exported_fns:
+        return ""
+
+    # Find classes used as return types (for result object creation).
+    # Direct RInstance return types are detected from the function signature.
+    # For list return types, the element type isn't in RType, so we scan all
+    # module functions for Call ops that construct ext classes — these are the
+    # objects built in the hot loop. As a fallback, any ext class with __init__
+    # is included (the bridge only generates make_* for classes it actually needs).
+    result_classes: set[Any] = set()
+    for _, fn, _, _ in exported_fns:
+        ret = fn.ret_type
+        if isinstance(ret, RInstance):
+            result_classes.add(ret.class_ir)
+    # Scan ALL functions (not just exported) for class instantiations
+    for module_ir in module_irs:
+        if isinstance(module_ir, str):
+            continue
+        for fn in module_ir.functions:
+            for block in fn.blocks:
+                for op in block.ops:
+                    if isinstance(op, Call):
+                        called_ret = op.fn.sig.ret_type
+                        if isinstance(called_ret, RInstance) and called_ret.class_ir.is_ext_class:
+                            result_classes.add(called_ret.class_ir)
+    # Filter out mypyc-generated dunder wrapper classes (e.g. __str___TokenType_obj)
+    # — these are not module-level attributes and can't be looked up via GetAttrString
+    result_classes = {
+        c for c in result_classes if not c.name.endswith("_obj") or not c.name.startswith("__")
+    }
+
+    # Find enum classes and compute cache sizes from resolved enum values
+    enum_prefixes: set[str] = set()
+    for module_ir in module_irs:
+        if isinstance(module_ir, str):
+            continue
+        for fn in module_ir.functions:
+            for block in fn.blocks:
+                for op in block.ops:
+                    if isinstance(op, LoadStatic) and "." in op.identifier:
+                        prefix = op.identifier.split(".")[0]
+                        if prefix not in ("builtins",):
+                            enum_prefixes.add(prefix)
+
+    # Compute max enum value per prefix from the resolved enum values
+    from mypyc.codegen.emit_rawc import RawcFunctionEmitter
+
+    enum_cache_sizes: dict[str, int] = {}
+    for key, val in RawcFunctionEmitter._enum_values.items():
+        prefix = key.split(".")[0]
+        if prefix in enum_prefixes:
+            enum_cache_sizes[prefix] = max(enum_cache_sizes.get(prefix, 0), val + 1)
+
+    # Find module globals and exception types by scanning IR patterns.
+    # Module globals: LoadStatic(globals) followed by LoadLiteral("_NAME")
+    # Exception types: LoadStatic(namespace='type') in functions that contain CPy_Raise.
+    # The rawc pipeline converts type-namespace loads to globals dict lookups.
+    global_names: dict[str, str] = {}  # name -> module fullname
+    exc_type_names: set[str] = set()
+    for module_ir in module_irs:
+        if isinstance(module_ir, str):
+            continue
+        for fn in module_ir.functions:
+            # Check if this function contains CPy_Raise anywhere
+            has_raise = any(
+                isinstance(op, CallC) and op.function_name == "CPy_Raise"
+                for block in fn.blocks
+                for op in block.ops
+            )
+            for block in fn.blocks:
+                for i, op in enumerate(block.ops):
+                    if isinstance(op, LoadStatic) and op.identifier == "globals":
+                        if i + 1 < len(block.ops):
+                            nxt = block.ops[i + 1]
+                            if isinstance(nxt, LoadLiteral) and isinstance(nxt.value, str):
+                                name = nxt.value
+                                if name.startswith("_") and name[1:].isupper():
+                                    global_names[name] = module_ir.fullname
+                    # Detect exception types loaded via LoadStatic(namespace='type')
+                    # The rawc pipeline converts these to globals dict lookups.
+                    if (
+                        has_raise
+                        and isinstance(op, LoadStatic)
+                        and op.namespace == "type"
+                        and op.identifier not in ("globals", "builtins")
+                    ):
+                        exc_type_names.add(op.identifier)
+
+    lines: list[str] = []
+    L = lines.append
+
+    L("/* Generated by mypyc rawc mode — Python bridge */")
+    L("/* Only @mypyc_attr(rawc_export=True) functions are exposed */")
+    L("#include <Python.h>")
+    if group_name:
+        L(f'#include "__native_{group_name}.h"')
+    L('#include "rawc_rt.h"')
+    L("typedef struct Rawc_List { intptr_t *data; int64_t len; int64_t cap; } Rawc_List;")
+    L("extern uint32_t *rawc_char_strings[256];")
+    L("extern int rawc_error_flag;")
+    L("extern intptr_t rawc_error_msg;")
+    L("extern intptr_t rawc_error_type;")
+    L("#define rawc_str_len(s) (((int64_t *)(s))[-1])")
+    L("static inline int64_t rawc_strlen(intptr_t v) {")
+    L("    if ((uintptr_t)v <= 4096) return 0;")
+    L("    return rawc_str_len(v);")
+    L("}")
+    L("/* Convert UCS-4 rawc string to UTF-8 for Python */")
+    L("static inline PyObject *rawc_to_pystr(intptr_t s) {")
+    L("    if (!s || (uintptr_t)s <= 4096) return PyUnicode_New(0, 0);")
+    L("    int64_t len = rawc_str_len(s);")
+    L("    return PyUnicode_FromKindAndData(PyUnicode_4BYTE_KIND, (const void *)s, len);")
+    L("}")
+    L("/* Allocate UCS-4 string from UTF-8 C string (for bridge init) */")
+    L("static inline intptr_t rawc_str_new(const char *src, int64_t byte_len) {")
+    L("    int64_t char_count = 0;")
+    L("    for (int64_t i = 0; i < byte_len; ) {")
+    L("        unsigned char c = (unsigned char)src[i];")
+    L(
+        "        if (c < 0x80) i += 1; else if (c < 0xE0) i += 2; else if (c < 0xF0) i += 3; else i += 4;"
+    )
+    L("        char_count++;")
+    L("    }")
+    L(
+        "    int64_t *block = (int64_t *)rawc_alloc(sizeof(int64_t) + (char_count + 1) * sizeof(uint32_t));"
+    )
+    L("    block[0] = char_count;")
+    L("    uint32_t *data = (uint32_t *)(block + 1);")
+    L("    int64_t pos = 0;")
+    L("    for (int64_t i = 0; i < char_count; i++) {")
+    L("        unsigned char c = (unsigned char)src[pos];")
+    L("        if (c < 0x80) { data[i] = c; pos += 1; }")
+    L(
+        "        else if (c < 0xE0) { data[i] = ((c & 0x1F) << 6) | (src[pos+1] & 0x3F); pos += 2; }"
+    )
+    L(
+        "        else if (c < 0xF0) { data[i] = ((c & 0x0F) << 12) | ((src[pos+1] & 0x3F) << 6) | (src[pos+2] & 0x3F); pos += 3; }"
+    )
+    L(
+        "        else { data[i] = ((c & 0x07) << 18) | ((src[pos+1] & 0x3F) << 12) | ((src[pos+2] & 0x3F) << 6) | (src[pos+3] & 0x3F); pos += 4; }"
+    )
+    L("    }")
+    L("    data[char_count] = 0;")
+    L("    return (intptr_t)data;")
+    L("}")
+    L("")
+
+    # Extern declarations for all exported functions
+    L("extern Rawc_Dict rawc_module_globals;")
+    for _, fn, _, _ in exported_fns:
+        fn_name = rawc_function_name(fn.decl)
+        args = ", ".join(
+            (
+                f"intptr_t {REG_PREFIX}{a.name}"
+                if is_str_rprimitive(a.type)
+                else f"{rawc_ctype_spaced(a.type)}{REG_PREFIX}{a.name}"
+            )
+            for a in fn.decl.sig.args
+        )
+        ret = rawc_ctype(fn.decl.sig.ret_type)
+        L(f"extern {ret} {fn_name}({args});")
+    L("")
+
+    # Static state
+    for cls in result_classes:
+        L(f"static PyTypeObject *Rawc_{cls.name}_Type = NULL;")
+    for ep in sorted(enum_prefixes):
+        size = enum_cache_sizes.get(ep, 1)
+        L(f"#define RAWC_{ep}_CACHE_SIZE {size}")
+        L(f"static PyObject *Rawc_{ep}_cache[RAWC_{ep}_CACHE_SIZE] = {{0}};")
+    # Config state for class-based exports
+    config_classes: set[str] = set()
+    for _, fn, is_method, cls in exported_fns:
+        if is_method and cls:
+            config_classes.add(cls.name)
+    L("")
+
+    # Generic helpers (same as before)
+    L("static Rawc_List *rawc_new_list(void) {")
+    L("    Rawc_List *l = (Rawc_List *)rawc_alloc(sizeof(Rawc_List));")
+    L("    memset(l, 0, sizeof(Rawc_List)); return l; }")
+    L("static void rawc_list_append(Rawc_List *l, intptr_t v) {")
+    L("    if (l->len >= l->cap) { int64_t nc = l->cap ? l->cap*2 : 16;")
+    L("        intptr_t *ndata = rawc_alloc(sizeof(intptr_t)*nc);")
+    L("        if (l->data) memcpy(ndata, l->data, sizeof(intptr_t)*l->len);")
+    L("        l->data = ndata; l->cap = nc; }")
+    L("    l->data[l->len++] = v; }")
+    L("static intptr_t rawc_intern_pystr(PyObject *s) {")
+    L("    Py_ssize_t byte_len;")
+    L("    const char *p = PyUnicode_AsUTF8AndSize(s, &byte_len); if (!p) return 0;")
+    L("    Py_ssize_t char_len = PyUnicode_GET_LENGTH(s);")
+    L(
+        "    if (char_len == 1 && (unsigned char)p[0] < 128) return (intptr_t)rawc_char_strings[(unsigned char)p[0]];"
+    )
+    L("    return rawc_str_new(p, byte_len); }")
+    L("")
+
+    # Generic converters
+    L("static Rawc_Dict *rawc_convert_dict(PyObject *d) {")
+    L("    Rawc_Dict *r = Rawc_Dict_New();")
+    L("    PyObject *k, *v; Py_ssize_t pos = 0;")
+    L("    while (PyDict_Next(d, &pos, &k, &v)) {")
+    L("        intptr_t ck;")
+    L("        if (PyLong_Check(k)) { long ki = PyLong_AsLong(k);")
+    L("            if (ki == 0) { Rawc_Dict_SetInt0(r, 1); continue; } ck = (intptr_t)ki; }")
+    L("        else ck = rawc_intern_pystr(k);")
+    L("        intptr_t cv;")
+    L("        if (PyLong_Check(v)) cv = (intptr_t)PyLong_AsLong(v);")
+    L("        else if (PyDict_Check(v)) cv = (intptr_t)rawc_convert_dict(v);")
+    L("        else if (PyUnicode_Check(v)) cv = rawc_intern_pystr(v);")
+    L("        else if (PyTuple_Check(v)) {")
+    L("            Py_ssize_t tsz = PyTuple_GET_SIZE(v);")
+    L("            intptr_t *t = (intptr_t *)rawc_alloc(sizeof(intptr_t) * tsz);")
+    L("            for (Py_ssize_t i = 0; i < tsz; i++) {")
+    L("                PyObject *it = PyTuple_GET_ITEM(v, i);")
+    L("                if (PyLong_Check(it)) t[i] = (intptr_t)PyLong_AsLong(it);")
+    L("                else t[i] = rawc_intern_pystr(it); }")
+    L("            cv = (intptr_t)t; }")
+    L("        else if (v == Py_None) cv = 0;")
+    L("        else if (PyBool_Check(v)) cv = v == Py_True ? 1 : 0;")
+    L(
+        "        else { cv = (intptr_t)PyLong_AsLong(v); if(PyErr_Occurred()){PyErr_Clear();cv=0;} }"
+    )
+    L("        Rawc_Dict_Set(r, ck, cv); }")
+    L("    return r; }")
+    L("")
+    L("static Rawc_Dict *rawc_convert_set(PyObject *s) {")
+    L("    Rawc_Dict *r = Rawc_Dict_New();")
+    L("    PyObject *iter = PyObject_GetIter(s); if (!iter) { PyErr_Clear(); return r; }")
+    L("    PyObject *item;")
+    L("    while ((item = PyIter_Next(iter))) {")
+    L("        intptr_t k;")
+    L("        if (PyUnicode_Check(item)) k = rawc_intern_pystr(item);")
+    L("        else if (PyLong_Check(item)) k = (intptr_t)PyLong_AsLong(item);")
+    L("        else { Py_DECREF(item); continue; }")
+    L("        if (k == 0) Rawc_Dict_SetInt0(r, 1); else Rawc_Dict_Set(r, k, 1);")
+    L("        Py_DECREF(item); }")
+    L("    Py_DECREF(iter); return r; }")
+    L("")
+    L("static intptr_t rawc_convert_value(PyObject *v) {")
+    L("    intptr_t r;")
+    L("    if (PyDict_Check(v)) r = (intptr_t)rawc_convert_dict(v);")
+    L("    else if (PySet_Check(v) || PyFrozenSet_Check(v)) r = (intptr_t)rawc_convert_set(v);")
+    L("    else if (PyList_Check(v)) {")
+    L("        Rawc_List *l = rawc_new_list();")
+    L("        for (Py_ssize_t i = 0; i < PyList_GET_SIZE(v); i++) {")
+    L("            PyObject *it = PyList_GET_ITEM(v, i);")
+    L("            if (PyUnicode_Check(it)) rawc_list_append(l, rawc_intern_pystr(it));")
+    L("            else if (PyLong_Check(it)) rawc_list_append(l, (intptr_t)PyLong_AsLong(it));")
+    L("            else if (PyTuple_Check(it)) {")
+    L("                Py_ssize_t tsz = PyTuple_GET_SIZE(it);")
+    L("                intptr_t *t = (intptr_t *)rawc_alloc(sizeof(intptr_t) * tsz);")
+    L("                for (Py_ssize_t j = 0; j < tsz; j++) {")
+    L("                    PyObject *elem = PyTuple_GET_ITEM(it, j);")
+    L("                    if (PyLong_Check(elem)) t[j] = (intptr_t)PyLong_AsLong(elem);")
+    L("                    else t[j] = rawc_intern_pystr(elem); }")
+    L("                rawc_list_append(l, (intptr_t)t); }")
+    L("            else if (PyList_Check(it)) {")
+    L("                Rawc_List *sl = rawc_new_list();")
+    L("                for (Py_ssize_t j = 0; j < PyList_GET_SIZE(it); j++) {")
+    L("                    PyObject *si = PyList_GET_ITEM(it, j);")
+    L("                    if (PyUnicode_Check(si)) rawc_list_append(sl, rawc_intern_pystr(si));")
+    L(
+        "                    else if (PyLong_Check(si)) rawc_list_append(sl, (intptr_t)PyLong_AsLong(si)); }"
+    )
+    L("                rawc_list_append(l, (intptr_t)sl); } }")
+    L("        r = (intptr_t)l; }")
+    L("    else if (PyBool_Check(v)) r = v == Py_True ? 1 : 0;")
+    L("    else if (PyUnicode_Check(v)) r = rawc_intern_pystr(v);")
+    L("    else if (PyLong_Check(v)) r = (intptr_t)PyLong_AsLong(v);")
+    L("    else r = 0;")
+    L("    return r; }")
+    L("")
+    L("static intptr_t rawc_convert_attr(PyObject *obj, const char *name) {")
+    L("    PyObject *v = PyObject_GetAttrString(obj, name);")
+    L("    if (!v) { PyErr_Clear(); return 0; }")
+    L("    intptr_t r = (v != Py_None) ? rawc_convert_value(v) : 0;")
+    L("    Py_DECREF(v); return r; }")
+    L("")
+
+    # Result object creation for each result class
+    for cls in result_classes:
+        attrs = list(cls.attributes.items())
+        params = []
+        for attr_name, attr_type in attrs:
+            if (
+                isinstance(attr_type, RInstance)
+                or is_str_rprimitive(attr_type)
+                or is_object_rprimitive(attr_type)
+                or is_list_rprimitive(attr_type)
+            ):
+                params.append(f"PyObject *{attr_name}")
+            else:
+                params.append(f"int64_t {attr_name}")
+        from mypyc.namegen import exported_name as _exported_name
+
+        result_struct = f"{_exported_name(cls.fullname)}Object"
+        L(f"static inline PyObject *rawc_make_{cls.name}({', '.join(params)}) {{")
+        L(f"    PyObject *obj = Rawc_{cls.name}_Type->tp_alloc(Rawc_{cls.name}_Type, 0);")
+        L("    if (!obj) return NULL;")
+        for i, (attr_name, attr_type) in enumerate(attrs):
+            c_field = f"_{attr_name}"
+            offset_expr = f"offsetof({result_struct}, {c_field})"
+            if (
+                isinstance(attr_type, RInstance)
+                or is_str_rprimitive(attr_type)
+                or is_object_rprimitive(attr_type)
+                or is_list_rprimitive(attr_type)
+            ):
+                L(f"    Py_INCREF({attr_name});")
+                L(f"    *(PyObject **)((char *)obj + {offset_expr}) = {attr_name};")
+            elif is_int64_rprimitive(attr_type) or is_int_rprimitive(attr_type):
+                L(f"    *(int64_t *)((char *)obj + {offset_expr}) = {attr_name} << 1;")
+        L("    return obj; }")
+        L("")
+
+    # One-time global init (types, enums, module globals)
+    L("static void rawc_globals_init(void) {")
+    L("    static int done = 0;")
+    L("    if (done) return;")
+    L("    done = 1;")
+    L("    Rawc_Init();")
+    for mod_name in all_module_names:
+        L(f'    {{ PyObject *mod = PyImport_ImportModule("{mod_name}");')
+        for cls in result_classes:
+            if any(
+                c.name == cls.name
+                for m in module_irs
+                if not isinstance(m, str) and m.fullname == mod_name
+                for c in m.classes
+            ):
+                L(
+                    f'      Rawc_{cls.name}_Type = (PyTypeObject *)PyObject_GetAttrString(mod, "{cls.name}");'
+                )
+        for ep in sorted(enum_prefixes):
+            L(f'      {{ PyObject *cls = PyObject_GetAttrString(mod, "{ep}");')
+            L(
+                f'        if (cls) {{ for (int i = 0; i < RAWC_{ep}_CACHE_SIZE; i++) {{ Rawc_{ep}_cache[i] = PyObject_CallFunction(cls, "i", i); if (!Rawc_{ep}_cache[i]) PyErr_Clear(); }} Py_DECREF(cls); }}'
+            )
+            L("        else PyErr_Clear(); }")
+        L("      Py_DECREF(mod); }")
+    L("    rawc_module_globals = *Rawc_Dict_New();")
+    for gname in sorted(global_names):
+        gmod = global_names[gname]
+        L(f'    {{ PyObject *mod = PyImport_ImportModule("{gmod}");')
+        L(f'      if (mod) {{ intptr_t v = rawc_convert_attr(mod, "{gname}");')
+        L(
+            f'        if (v) Rawc_Dict_Set(&rawc_module_globals, rawc_str_new("{gname}", {len(gname)}), v);'
+        )
+        L("        Py_DECREF(mod); }")
+        L("      else PyErr_Clear(); }")
+    # Store exception class names in globals so raise can find them.
+    # Value is the name string itself — bridge uses rawc_error_type to look up the class.
+    for ename in sorted(exc_type_names):
+        L(f'    {{ intptr_t k = rawc_str_new("{ename}", {len(ename)});')
+        L("      Rawc_Dict_Set(&rawc_module_globals, k, k); }")
+    L("    rawc_arena_mark(); /* protect global data; per-call data allocated after this */")
+    L("}")
+    L("")
+
+    # Per-class init_self: read attrs directly from the mypyc struct at known
+    # offsets and convert to rawc format. Uses a static buffer — no malloc.
+    # Called on every rawc entry to pick up the current instance's config.
+    init_cls_done: set[str] = set()
+    for _, fn, is_method, cls in exported_fns:
+        if not is_method or not cls or cls.name in init_cls_done:
+            continue
+        init_cls_done.add(cls.name)
+        n_attrs = len(cls.attributes)
+        init_method = cls.get_method("__init__")
+        if not init_method:
+            continue
+        init_params = [
+            a.name for a in init_method.decl.sig.args[1:] if not a.name.startswith("__")
+        ]
+        config_attrs = [a for a in cls.attributes if a in set(init_params)]
+
+        # Compute mypyc struct type name for offsetof()
+        from mypyc.namegen import exported_name as _exported_name
+
+        struct_type = f"{_exported_name(cls.fullname)}Object"
+
+        L(f"static _Thread_local intptr_t Rawc_{cls.name}_self_buf[{n_attrs}];")
+        L(f"static inline intptr_t Rawc_{cls.name}_init_self(PyObject *py_obj) {{")
+        for i, attr in enumerate(config_attrs):
+            c_field = f"_{attr}"  # mypyc prefixes attrs with _
+            attr_type = cls.attributes[attr]
+            offset_expr = f"offsetof({struct_type}, {c_field})"
+            if is_bool_or_bit_rprimitive(attr_type):
+                L(
+                    f"    Rawc_{cls.name}_self_buf[{i}] = (intptr_t)*(char *)((char *)py_obj + {offset_expr}); /* {attr} (bool) */"
+                )
+            elif (
+                is_int_rprimitive(attr_type)
+                or is_short_int_rprimitive(attr_type)
+                or is_int64_rprimitive(attr_type)
+                or is_float_rprimitive(attr_type)
+            ):
+                L(
+                    f"    Rawc_{cls.name}_self_buf[{i}] = *(intptr_t *)((char *)py_obj + {offset_expr}); /* {attr} */"
+                )
+            else:
+                L(
+                    f"    {{ PyObject *v = *(PyObject **)((char *)py_obj + {offset_expr}); /* {attr} */"
+                )
+                L(
+                    f"      Rawc_{cls.name}_self_buf[{i}] = (v && v != Py_None) ? rawc_convert_value(v) : 0; }}"
+                )
+        L(f"    return (intptr_t)Rawc_{cls.name}_self_buf;")
+        L("}")
+        L("")
+
+    # rawc_init: Python-callable entry point (optional, for pre-warming)
+    L("PyObject *rawc_init(PyObject *self, PyObject *args) {")
+    L("    PyObject *py_obj;")
+    L('    if (!PyArg_ParseTuple(args, "O", &py_obj)) return NULL;')
+    L("    rawc_globals_init();")
+    L("    Py_RETURN_NONE;")
+    L("}")
+    L("")
+
+    # Generate list-to-pylist converter helpers for exported methods returning lists
+    for _, fn, is_method, cls in exported_fns:
+        if not (is_method and cls and is_list_rprimitive(fn.ret_type)):
+            continue
+        helper_name = f"rawc_items_to_pylist_{fn.name}"
+        L(f"static PyObject *{helper_name}(Rawc_List *items) {{")
+        L("    if (!items) return PyList_New(0);")
+        L("    PyObject *list = PyList_New(items->len);")
+        L("    for (int64_t i = 0; i < items->len; i++) {")
+        L("        intptr_t *r = (intptr_t *)items->data[i];")
+        for rcls in result_classes:
+            attrs = list(rcls.attributes.items())
+            result_args = []
+            for j, (attr_name, attr_type) in enumerate(attrs):
+                if isinstance(attr_type, RInstance):
+                    enum_name = attr_type.class_ir.name
+                    L(f"        int32_t _{attr_name} = (int32_t)r[{j}];")
+                    L(
+                        f"        PyObject *py_{attr_name} = (_{attr_name} >= 0 && _{attr_name} < RAWC_{enum_name}_CACHE_SIZE && Rawc_{enum_name}_cache[_{attr_name}]) ? Rawc_{enum_name}_cache[_{attr_name}] : Py_None;"
+                    )
+                    result_args.append(f"py_{attr_name}")
+                elif is_str_rprimitive(attr_type):
+                    L(f"        intptr_t rawc_{attr_name} = r[{j}];")
+                    L(f"        PyObject *py_{attr_name} = rawc_to_pystr(rawc_{attr_name});")
+                    result_args.append(f"py_{attr_name}")
+                elif is_list_rprimitive(attr_type):
+                    L(f"        Rawc_List *rawc_{attr_name} = (Rawc_List *)r[{j}];")
+                    L(f"        PyObject *py_{attr_name};")
+                    L(f"        if (rawc_{attr_name} && rawc_{attr_name}->len > 0) {{")
+                    L(f"            py_{attr_name} = PyList_New(rawc_{attr_name}->len);")
+                    L(f"            for (int64_t ci = 0; ci < rawc_{attr_name}->len; ci++) {{")
+                    L(f"                intptr_t cs = rawc_{attr_name}->data[ci];")
+                    L("                PyObject *ps = rawc_to_pystr(cs);")
+                    L(f"                PyList_SET_ITEM(py_{attr_name}, ci, ps);")
+                    L("            }")
+                    L(f"        }} else {{ py_{attr_name} = PyList_New(0); }}")
+                    result_args.append(f"py_{attr_name}")
+                else:
+                    result_args.append(f"r[{j}]")
+            L(f"        PyObject *obj = rawc_make_{rcls.name}({', '.join(result_args)});")
+            # Decref all newly-created PyObject* refs. RInstance attrs are
+            # borrowed from the enum cache and must NOT be decref'd.
+            for j, (attr_name, attr_type) in enumerate(attrs):
+                if not isinstance(attr_type, RInstance) and f"py_{attr_name}" in result_args:
+                    L(f"        Py_DECREF(py_{attr_name});")
+            break  # only use first result class
+        L("        if (!obj) { Py_DECREF(list); return NULL; }")
+        L("        PyList_SET_ITEM(list, i, obj);")
+        L("    }")
+        L("    return list;")
+        L("}")
+        L("")
+
+    # Generate native (direct-call) and METH_VARARGS wrappers for each export.
+    # rawc_native_<name>: called directly by vtable stubs (no tuple overhead)
+    # rawc_py_<name>: METH_VARARGS wrapper called from Python method table
+    method_defs: list[str] = []
+
+    for _, fn, is_method, cls in exported_fns:
+        fn_name = rawc_function_name(fn.decl)
+        py_name = fn.name
+        native_name = f"rawc_native_{py_name}"
+
+        if not (is_method and cls):
+            raise NotImplementedError(f"rawc: non-method exports not yet supported ({fn.name})")
+
+        # --- Native entry point (no tuple packing) ---
+        L(f"PyObject *{native_name}(PyObject *self, PyObject *input_obj) {{")
+        L("    rawc_globals_init();")
+        L("    rawc_arena_reset(); /* free previous per-call data (config + tokens) */")
+        L(f"    intptr_t rawc_self = Rawc_{cls.name}_init_self(self);")
+        L("    Py_ssize_t input_byte_len;")
+        L(
+            "    const char *input = PyUnicode_AsUTF8AndSize(input_obj, &input_byte_len); if (!input) return NULL;"
+        )
+        L("    if (setjmp(rawc_error_jmp) != 0) {")
+        L("        rawc_error_flag = 0;")
+        L("        if (rawc_error_msg) {")
+        L("            PyObject *msg = rawc_to_pystr(rawc_error_msg);")
+        L("            PyObject *exc_cls = NULL;")
+        L("            if (rawc_error_type) {")
+        L("                PyObject *type_name = rawc_to_pystr(rawc_error_type);")
+        L("                if (type_name) {")
+        for mod_name in all_module_names:
+            L(
+                f'                    if (!exc_cls) {{ PyObject *m = PyImport_ImportModule("{mod_name}");'
+            )
+            L(
+                "                      if (m) { exc_cls = PyObject_GetAttrString(m, PyUnicode_AsUTF8(type_name));"
+            )
+            L("                        if (!exc_cls) PyErr_Clear();")
+            L("                        Py_DECREF(m); }")
+            L("                      else PyErr_Clear(); }")
+        L("                    Py_DECREF(type_name);")
+        L("                }")
+        L("            }")
+        L("            rawc_error_msg = 0;")
+        L("            rawc_error_type = 0;")
+        L("            PyErr_SetObject(exc_cls ? exc_cls : PyExc_RuntimeError, msg);")
+        L("            Py_XDECREF(exc_cls);")
+        L("            Py_DECREF(msg);")
+        L("        } else {")
+        L(
+            '            PyErr_SetString(PyExc_RuntimeError, "rawc: exception raised in compiled code");'
+        )
+        L("        }")
+        if is_list_rprimitive(fn.ret_type):
+            for attr_idx, attr_name in enumerate(cls.attributes):
+                attr_type = cls.attributes[attr_name]
+                if is_list_rprimitive(attr_type) and attr_name == "tokens":
+                    helper_name = f"rawc_items_to_pylist_{fn.name}"
+                    L(
+                        f"        {{ Rawc_List *partial = (Rawc_List *)((intptr_t *)rawc_self)[{attr_idx}];"
+                    )
+                    L("          if (partial && partial->len > 0) {")
+                    L(f"            PyObject *py_partial = {helper_name}(partial);")
+                    L(
+                        "            if (py_partial) { PyObject *saved = PyErr_GetRaisedException();"
+                    )
+                    L(f'              PyObject_SetAttrString(self, "{attr_name}", py_partial);')
+                    L("              PyErr_SetRaisedException(saved);")
+                    L("              Py_DECREF(py_partial); }")
+                    L("        } }")
+                    break
+        L("        rawc_arena_reset(); /* clean up per-call data on error */")
+        L("        return NULL;")
+        L("    }")
+        L("    intptr_t input_lp = rawc_str_new(input, input_byte_len);")
+        L(f"    intptr_t result = {fn_name}(rawc_self, input_lp);")
+
+        ret_type = fn.ret_type
+        if is_list_rprimitive(ret_type):
+            helper_name = f"rawc_items_to_pylist_{fn.name}"
+            L(f"    return {helper_name}((Rawc_List *)result);")
+        else:
+            L("    return PyLong_FromLongLong((long long)result);")
+        L("}")
+        L("")
+
+        # --- METH_VARARGS wrapper (thin shell for Python method table) ---
+        wrapper_name = f"rawc_py_{py_name}"
+        L(f"PyObject *{wrapper_name}(PyObject *self, PyObject *args) {{")
+        L("    PyObject *input_obj;")
+        L('    if (!PyArg_ParseTuple(args, "O", &input_obj)) return NULL;')
+        L(f"    return {native_name}(self, input_obj);")
+        L("}")
+        L("")
+
+        method_defs.append(f'    {{"{py_name}", {wrapper_name}, METH_VARARGS, NULL}},')
+
+    return "\n".join(lines)

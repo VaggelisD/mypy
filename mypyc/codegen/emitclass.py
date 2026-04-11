@@ -998,8 +998,13 @@ def generate_methods_table(
         if fn.decl.is_prop_setter or fn.decl.is_prop_getter or fn.internal:
             continue
         emitter.emit_line(f'{{"{fn.name}",')
-        emitter.emit_line(f" (PyCFunction){PREFIX}{fn.cname(emitter.names)},")
-        flags = ["METH_FASTCALL", "METH_KEYWORDS"]
+        if fn.decl.rawc_export:
+            # Point to the rawc wrapper instead of the mypyc wrapper
+            emitter.emit_line(f" (PyCFunction)rawc_py_{fn.name},")
+            flags = ["METH_VARARGS"]
+        else:
+            emitter.emit_line(f" (PyCFunction){PREFIX}{fn.cname(emitter.names)},")
+            flags = ["METH_FASTCALL", "METH_KEYWORDS"]
         if fn.decl.kind == FUNC_STATICMETHOD:
             flags.append("METH_STATIC")
         elif fn.decl.kind == FUNC_CLASSMETHOD:

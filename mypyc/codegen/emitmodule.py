@@ -480,6 +480,16 @@ def compile_modules_to_c(
     if errors.num_errors > 0:
         return {}, [], Mapper({})
 
+    # Mark rawc_export functions on their FuncDecls so the C emitter
+    # can point the method table to the rawc wrapper.
+    if compiler_options.rawc_export_names:
+        for mod in modules.values():
+            for cls in mod.classes:
+                for fn in cls.methods.values():
+                    key = f"{cls.name}.{fn.name}"
+                    if key in compiler_options.rawc_export_names:
+                        fn.decl.rawc_export = True
+
     ctext = compile_ir_to_c(groups, modules, result, mapper, compiler_options)
     write_cache(modules, result, group_map, ctext)
 
@@ -587,6 +597,19 @@ class GroupGenerator:
                 base_emitter.emit_line(f'#include "{source_dep.path}"')
         base_emitter.emit_line(f'#include "__native{self.short_group_suffix}.h"')
         base_emitter.emit_line(f'#include "__native_internal{self.short_group_suffix}.h"')
+
+        # Add extern declarations for rawc bridge functions
+        if self.compiler_options.rawc_export_names:
+            base_emitter.emit_line("extern PyObject *rawc_init(PyObject *, PyObject *);")
+            for export_name in sorted(self.compiler_options.rawc_export_names):
+                fn_name = export_name.split(".")[-1]
+                base_emitter.emit_line(
+                    f"extern PyObject *rawc_py_{fn_name}(PyObject *, PyObject *);"
+                )
+                base_emitter.emit_line(
+                    f"extern PyObject *rawc_native_{fn_name}(PyObject *, PyObject *);"
+                )
+
         emitter = base_emitter
 
         self.generate_literal_tables()
@@ -608,10 +631,38 @@ class GroupGenerator:
             # Generate Python extension module definitions and module initialization functions.
             self.generate_module_def(emitter, module_name, module)
 
+            # Determine which classes are rawc classes (all methods handled by rawc)
+            rawc_class_names: set[str] = set()
+            for name in self.compiler_options.rawc_export_names:
+                if "." in name:
+                    rawc_class_names.add(name.split(".")[0])
+
             for fn in module.functions:
                 emitter.emit_line()
-                generate_native_function(fn, emitter, self.source_paths[module_name], module_name)
+                # For methods in rawc classes, generate a minimal stub instead
+                # of full native code. Rawc provides the real implementation.
+                # Keep __init__, __repr__, __bool__, and other dunder/public methods
+                # that Python needs to call directly. Only stub the internal methods
+                # (private, non-dunder) and the rawc_export method itself.
+                if (
+                    fn.class_name
+                    and fn.class_name in rawc_class_names
+                    and fn.name != "__top_level__"
+                    and (
+                        fn.decl.rawc_export
+                        or (fn.name.startswith("_") and not fn.name.startswith("__"))
+                    )
+                ):
+                    self._generate_rawc_stub(fn, emitter)
+                else:
+                    generate_native_function(
+                        fn, emitter, self.source_paths[module_name], module_name
+                    )
                 if fn.name != TOP_LEVEL_NAME and not fn.internal:
+                    # Skip wrapper for rawc_export methods (method table
+                    # points to rawc wrapper directly)
+                    if fn.decl.rawc_export:
+                        continue
                     emitter.emit_line()
                     if is_fastcall_supported(fn, emitter.capi_version):
                         generate_wrapper_function(
@@ -977,6 +1028,37 @@ class GroupGenerator:
         )
 
         emitter.emit_lines("is_initialized = 1;", "return 0;", "}")
+
+    def _generate_rawc_stub(self, fn: FuncIR, emitter: Emitter) -> None:
+        """Generate a stub that forwards to the rawc bridge function.
+
+        mypyc-compiled callers use the vtable (direct C function pointers),
+        not the Python method table. The stub calls rawc_native_<name>
+        directly, avoiding tuple pack/unpack overhead.
+        """
+        from mypyc.codegen.emitfunc import native_function_header
+
+        header = native_function_header(fn.decl, emitter)
+        if fn.decl.rawc_export:
+            args = fn.decl.sig.args
+            arg_names = [f"(PyObject *)cpy_r_{a.name}" for a in args[1:]]  # skip self
+            emitter.emit_line(f"{header} {{")
+            if len(arg_names) == 1:
+                emitter.emit_line(f"    return rawc_native_{fn.name}(cpy_r_self, {arg_names[0]});")
+            elif len(arg_names) == 0:
+                emitter.emit_line(f"    return rawc_native_{fn.name}(cpy_r_self, Py_None);")
+            else:
+                # Multiple args — fall back to tuple packing
+                n = len(arg_names)
+                emitter.emit_line(
+                    f"    return rawc_py_{fn.name}(cpy_r_self, PyTuple_Pack({n}, {', '.join(arg_names)}));"
+                )
+            emitter.emit_line("}")
+        else:
+            error_val = emitter.c_error_value(fn.decl.sig.ret_type)
+            emitter.emit_line(f"{header} {{")
+            emitter.emit_line(f"    return {error_val};")
+            emitter.emit_line("}")
 
     def generate_module_def(self, emitter: Emitter, module_name: str, module: ModuleIR) -> None:
         """Emit the PyModuleDef struct for a module and the module init function."""

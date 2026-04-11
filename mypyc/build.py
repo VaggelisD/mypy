@@ -28,8 +28,11 @@ import time
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn, cast
 
+if TYPE_CHECKING:
+    from mypyc.ir.module_ir import ModuleIR
+
 import mypyc.build_setup  # noqa: F401
-from mypy.build import BuildSource
+from mypy.build import BuildSource, build
 from mypy.errors import CompileError
 from mypy.fscache import FileSystemCache
 from mypy.main import process_options
@@ -301,7 +304,7 @@ def generate_c(
     groups: emitmodule.Groups,
     fscache: FileSystemCache,
     compiler_options: CompilerOptions,
-) -> tuple[list[list[tuple[str, str]]], str, list[SourceDep]]:
+) -> tuple[list[list[tuple[str, str]]], str, list[SourceDep], dict[str, ModuleIR]]:
     """Drive the actual core compilation step.
 
     The groups argument describes how modules are assigned to C
@@ -347,7 +350,7 @@ def generate_c(
     # Collect SourceDep dependencies
     source_deps = sorted(emitmodule.collect_source_dependencies(modules), key=lambda d: d.path)
 
-    return ctext, "\n".join(format_modules(modules)), source_deps
+    return ctext, "\n".join(format_modules(modules)), source_deps, modules
 
 
 def build_using_shared_lib(
@@ -515,7 +518,9 @@ def mypyc_build(
     only_compile_paths: Iterable[str] | None = None,
     skip_cgen_input: tuple[list[list[tuple[str, str]]], list[str]] | None = None,
     always_use_shared_lib: bool = False,
-) -> tuple[emitmodule.Groups, list[tuple[list[str], list[str]]], list[SourceDep]]:
+) -> tuple[
+    emitmodule.Groups, list[tuple[list[str], list[str]]], list[SourceDep], dict[str, ModuleIR]
+]:
     """Do the front and middle end of mypyc building, producing and writing out C source."""
     fscache = FileSystemCache()
     mypyc_sources, all_sources, options = get_mypy_config(
@@ -539,8 +544,9 @@ def mypyc_build(
     # We let the test harness just pass in the c file contents instead
     # so that it can do a corner-cutting version without full stubs.
     source_deps: list[SourceDep] = []
+    modules: dict[str, ModuleIR] = {}
     if not skip_cgen_input:
-        group_cfiles, ops_text, source_deps = generate_c(
+        group_cfiles, ops_text, source_deps, modules = generate_c(
             all_sources, options, groups, fscache, compiler_options=compiler_options
         )
         # TODO: unique names?
@@ -564,7 +570,7 @@ def mypyc_build(
         deps = [os.path.join(compiler_options.target_dir, dep) for dep in get_header_deps(cfiles)]
         group_cfilenames.append((cfilenames, deps))
 
-    return groups, group_cfilenames, source_deps
+    return groups, group_cfilenames, source_deps, modules
 
 
 def get_cflags(
@@ -673,6 +679,7 @@ def mypycify(
     depends_on_librt_internal: bool = False,
     install_librt: bool = False,
     experimental_features: bool = False,
+    rawc_modules: list[str] | None = None,
 ) -> list[Extension]:
     """Main entry point to building using mypyc.
 
@@ -748,8 +755,41 @@ def mypycify(
         experimental_features=experimental_features,
     )
 
+    # Scan rawc modules for @mypyc_attr(rawc_export=True) and store names
+    if rawc_modules:
+        from mypyc.codegen.emit_rawc import _find_rawc_exports
+
+        _rawc_paths = [os.path.abspath(p) for p in rawc_modules]
+        _rawc_sources = []
+        for p in _rawc_paths:
+            name = os.path.splitext(os.path.basename(p))[0]
+            sd = os.path.dirname(p)
+            if os.path.exists(os.path.join(sd, "__init__.py")):
+                name = f"{os.path.basename(sd)}.{name}"
+            _rawc_sources.append(BuildSource(p, name))
+
+        _rawc_opts = Options()
+        _rawc_opts.strict_optional = True
+        _rawc_opts.python_version = (3, 13)
+        _rawc_opts.export_types = True
+        _rawc_opts.preserve_asts = True
+        _rawc_opts.incremental = False
+        _rawc_opts.mypy_path = [os.path.dirname(os.path.dirname(_rawc_paths[0]))]
+        try:
+            _rawc_result = build(
+                sources=_rawc_sources, options=_rawc_opts, fscache=FileSystemCache()
+            )
+            _trees = [
+                st.tree
+                for st in _rawc_result.graph.values()
+                if st.id in {s.module for s in _rawc_sources} and st.tree
+            ]
+            compiler_options.rawc_export_names = _find_rawc_exports(_trees)
+        except Exception:
+            pass
+
     # Generate all the actual important C code
-    groups, group_cfilenames, source_deps = mypyc_build(
+    groups, group_cfilenames, source_deps, mypyc_modules = mypyc_build(
         paths,
         only_compile_paths=only_compile_paths,
         compiler_options=compiler_options,
@@ -813,6 +853,63 @@ def mypycify(
             extensions.extend(
                 build_single_module(group_sources, cfilenames + shared_cfilenames, cflags)
             )
+
+    # Build rawc modules: compile rawc C files and generate the bridge from mypyc IR
+    if rawc_modules:
+        from mypyc.codegen.emit_rawc import generate_rawc_bridge_c
+        from mypyc.rawc_build import rawc_compile
+
+        rawc_target = target_dir or "build"
+        rawc_include = os.path.join(os.path.dirname(__file__), "lib-rt", "rawc")
+        rawc_paths = [os.path.abspath(p) for p in rawc_modules]
+
+        if verbose:
+            print(f"rawc: compiling {rawc_paths}")
+
+        # Clean stale bridge files from previous builds
+        import glob
+
+        for old_bridge in glob.glob(os.path.join(rawc_target, "*_bridge.c")):
+            os.remove(old_bridge)
+
+        # Generate rawc C function bodies (uses rawc IR)
+        rawc_c_paths = rawc_compile(rawc_paths, output_dir=rawc_target, verbose=verbose)
+
+        # Generate bridge from mypyc IR (correct struct offsets)
+        bridge_path = ""
+        if rawc_c_paths and compiler_options.rawc_export_names and mypyc_modules:
+            rawc_module_names = set()
+            for p in rawc_paths:
+                name = os.path.splitext(os.path.basename(p))[0]
+                sd = os.path.dirname(p)
+                if os.path.exists(os.path.join(sd, "__init__.py")):
+                    name = f"{os.path.basename(sd)}.{name}"
+                rawc_module_names.add(name)
+
+            mypyc_module_irs = [
+                mypyc_modules[name] for name in mypyc_modules if name in rawc_module_names
+            ]
+            # Get the shared lib group name for the #include of the native header
+            rawc_group_name = groups[0][1] or "" if groups else ""
+            bridge_c_code = generate_rawc_bridge_c(
+                mypyc_module_irs, compiler_options.rawc_export_names, group_name=rawc_group_name
+            )
+            if bridge_c_code:
+                bridge_name = list(rawc_module_names)[0].replace(".", "_")
+                bridge_path = os.path.join(rawc_target, f"{bridge_name}_bridge.c")
+                with open(bridge_path, "w") as f:
+                    f.write(bridge_c_code)
+                if verbose:
+                    print(f"  Bridge (from mypyc IR): {bridge_path}")
+
+        if rawc_c_paths:
+            rawc_extra_sources = rawc_c_paths + ([bridge_path] if bridge_path else [])
+            rawc_extra_includes = [rawc_include, rawc_target]
+
+            if extensions:
+                extensions[0].sources.extend(rawc_extra_sources)
+            for ext in extensions:
+                ext.include_dirs.extend(rawc_extra_includes)
 
     if install_librt:
         for name in RUNTIME_C_FILES:

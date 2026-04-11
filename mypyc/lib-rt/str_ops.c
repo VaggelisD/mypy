@@ -791,3 +791,8 @@ bool CPyStr_IsDigit(PyObject *str) {
 
 #undef CHECK_ISDIGIT
 }
+
+bool CPyStr_IsIdentifier(PyObject *str) {
+    /* Delegate to CPython's built-in str.isidentifier() */
+    return PyUnicode_IsIdentifier(str);
+}
