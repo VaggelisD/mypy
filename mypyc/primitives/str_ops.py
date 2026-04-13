@@ -11,6 +11,7 @@ from mypyc.ir.rtypes import (
     bytes_rprimitive,
     c_int_rprimitive,
     c_pyssize_t_rprimitive,
+    char_rprimitive,
     int64_rprimitive,
     int_rprimitive,
     list_rprimitive,
@@ -439,6 +440,14 @@ method_op(
     error_kind=ERR_NEVER,
 )
 
+method_op(
+    name="isalpha",
+    arg_types=[str_rprimitive],
+    return_type=bool_rprimitive,
+    c_function_name="CPyStr_IsAlpha",
+    error_kind=ERR_NEVER,
+)
+
 
 # obj.decode()
 method_op(
@@ -582,6 +591,88 @@ str_get_item_unsafe_as_int_op = custom_primitive_op(
     arg_types=[str_rprimitive, int64_rprimitive],
     return_type=short_int_rprimitive,
     c_function_name="CPyStr_GetItemUnsafeAsInt",
+    error_kind=ERR_NEVER,
+    dependencies=[STR_EXTRA_OPS],
+)
+
+# Buffer-access primitives: load string kind + data once, then use the per-char
+# reader inside a loop. Enables hoisting loop-invariant string metadata reads.
+# Safe because Python strings are immutable.
+
+str_load_kind_op = custom_primitive_op(
+    name="str_load_kind",
+    arg_types=[str_rprimitive],
+    return_type=c_int_rprimitive,
+    c_function_name="CPyStr_LoadKind",
+    error_kind=ERR_NEVER,
+    dependencies=[STR_EXTRA_OPS],
+)
+
+str_load_data_op = custom_primitive_op(
+    name="str_load_data",
+    arg_types=[str_rprimitive],
+    return_type=pointer_rprimitive,
+    c_function_name="CPyStr_LoadData",
+    error_kind=ERR_NEVER,
+    dependencies=[STR_EXTRA_OPS],
+)
+
+str_get_item_from_buffer_op = custom_primitive_op(
+    name="str_get_item_from_buffer",
+    arg_types=[c_int_rprimitive, pointer_rprimitive, int64_rprimitive],
+    return_type=short_int_rprimitive,
+    c_function_name="CPyStr_GetItemFromBuffer",
+    error_kind=ERR_NEVER,
+    dependencies=[STR_EXTRA_OPS],
+)
+
+# method_ops on char receiver: route .isspace() / .isdigit() / ... to
+# codepoint-taking C helpers defined in str_extra_ops.h.
+method_op(
+    name="isspace",
+    arg_types=[char_rprimitive],
+    return_type=bool_rprimitive,
+    c_function_name="CPyChar_IsSpace",
+    error_kind=ERR_NEVER,
+    dependencies=[STR_EXTRA_OPS],
+)
+method_op(
+    name="isdigit",
+    arg_types=[char_rprimitive],
+    return_type=bool_rprimitive,
+    c_function_name="CPyChar_IsDigit",
+    error_kind=ERR_NEVER,
+    dependencies=[STR_EXTRA_OPS],
+)
+method_op(
+    name="isalnum",
+    arg_types=[char_rprimitive],
+    return_type=bool_rprimitive,
+    c_function_name="CPyChar_IsAlnum",
+    error_kind=ERR_NEVER,
+    dependencies=[STR_EXTRA_OPS],
+)
+method_op(
+    name="isalpha",
+    arg_types=[char_rprimitive],
+    return_type=bool_rprimitive,
+    c_function_name="CPyChar_IsAlpha",
+    error_kind=ERR_NEVER,
+    dependencies=[STR_EXTRA_OPS],
+)
+method_op(
+    name="isidentifier",
+    arg_types=[char_rprimitive],
+    return_type=bool_rprimitive,
+    c_function_name="CPyChar_IsIdentifier",
+    error_kind=ERR_NEVER,
+    dependencies=[STR_EXTRA_OPS],
+)
+method_op(
+    name="upper",
+    arg_types=[char_rprimitive],
+    return_type=char_rprimitive,
+    c_function_name="CPyChar_Upper",
     error_kind=ERR_NEVER,
     dependencies=[STR_EXTRA_OPS],
 )

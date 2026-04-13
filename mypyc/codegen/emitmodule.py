@@ -66,6 +66,7 @@ from mypyc.irbuild.mapper import Mapper
 from mypyc.irbuild.prepare import load_type_map
 from mypyc.namegen import NameGenerator, exported_name
 from mypyc.options import CompilerOptions
+from mypyc.transform.char_str_index_fold import do_char_str_index_fold
 from mypyc.transform.copy_propagation import do_copy_propagation
 from mypyc.transform.exceptions import insert_exception_handling
 from mypyc.transform.flag_elimination import do_flag_elimination
@@ -73,6 +74,7 @@ from mypyc.transform.log_trace import insert_event_trace_logging
 from mypyc.transform.lower import lower_ir
 from mypyc.transform.refcount import insert_ref_count_opcodes
 from mypyc.transform.spill import insert_spills
+from mypyc.transform.str_buffer_hoist import do_str_buffer_hoist
 from mypyc.transform.uninit import insert_uninit_checks
 
 # All the modules being compiled are divided into "groups". A group
@@ -265,11 +267,16 @@ def compile_scc_to_ir(
 
             # Switch to lower abstraction level IR.
             lower_ir(fn, compiler_options)
+            # Perform optimizations that may introduce new primitives with
+            # their own source/header dependencies (e.g. str_extra_ops.h).
+            # Run them before dependency collection so their needs are picked up.
+            do_char_str_index_fold(fn, compiler_options)
+            do_str_buffer_hoist(fn, compiler_options)
             # Calculate implicit module dependencies (needed for librt)
             deps = find_implicit_op_dependencies(fn)
             if deps is not None:
                 module.dependencies.update(deps)
-            # Perform optimizations.
+            # Remaining optimizations.
             do_copy_propagation(fn, compiler_options)
             do_flag_elimination(fn, compiler_options)
 

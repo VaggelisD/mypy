@@ -394,6 +394,28 @@ uint8_rprimitive: Final = RPrimitive(
     error_overlap=True,
 )
 
+# char represents a single Unicode codepoint. Stored unboxed as int32 (the
+# full Unicode codepoint range of 0..0x10FFFF fits comfortably). Boxed form
+# is a 1-character str. Distinct from int32_rprimitive so specializers can
+# route char-typed operations through codepoint primitives.
+char_rprimitive: Final = RPrimitive(
+    "char",
+    is_unboxed=True,
+    is_refcounted=False,
+    # Marked native_int so mypyc's fixed-width coercion paths handle
+    # char <-> int32 transparently. Semantically char is a codepoint rather
+    # than a general integer; users shouldn't do arithmetic on it.
+    is_native_int=True,
+    is_signed=True,
+    ctype="int32_t",
+    size=4,
+    # error_overlap=False: the error sentinel -113 is outside the valid Unicode
+    # codepoint range (0..0x10FFFF), so the sentinel compare alone is
+    # authoritative — no PyErr_Occurred confirmation needed. This eliminates
+    # the double error check that ERR_MAGIC_OVERLAPPING requires.
+    error_overlap=False,
+)
+
 # The following unsigned native int types (u16, u32, u64) are not
 # exposed to the user. They are for internal use within mypyc only.
 
@@ -592,11 +614,16 @@ def is_fixed_width_rtype(rtype: RType) -> TypeGuard[RPrimitive]:
         or is_int32_rprimitive(rtype)
         or is_int16_rprimitive(rtype)
         or is_uint8_rprimitive(rtype)
+        or is_char_rprimitive(rtype)
     )
 
 
 def is_uint8_rprimitive(rtype: RType) -> TypeGuard[RPrimitive]:
     return rtype is uint8_rprimitive
+
+
+def is_char_rprimitive(rtype: RType) -> TypeGuard[RPrimitive]:
+    return rtype is char_rprimitive
 
 
 def is_uint32_rprimitive(rtype: RType) -> TypeGuard[RPrimitive]:

@@ -111,8 +111,8 @@ PyObject *CPyStr_GetItem(PyObject *str, CPyTagged index) {
             Py_UCS4 ch = PyUnicode_READ(kind, data, n);
             if (ch < 256) {
                 // Latin-1 single-char strings are cached by CPython, so
-                // PyUnicode_FromOrdinal returns the cached object (with a
-                // new reference) instead of allocating a new string each time.
+                // PyUnicode_FromOrdinal returns a borrowed+incref'd reference
+                // instead of allocating a new string object each time.
                 return PyUnicode_FromOrdinal(ch);
             }
             PyObject *unicode = PyUnicode_New(1, ch);
@@ -681,6 +681,29 @@ bool CPyStr_IsAlnum(PyObject *str) {
     return true;
 }
 
+bool CPyStr_IsAlpha(PyObject *str) {
+    Py_ssize_t len = PyUnicode_GET_LENGTH(str);
+    if (len == 0) return false;
+
+    if (PyUnicode_IS_ASCII(str)) {
+        const Py_UCS1 *data = PyUnicode_1BYTE_DATA(str);
+        for (Py_ssize_t i = 0; i < len; i++) {
+            if (!Py_ISALPHA(data[i]))
+                return false;
+        }
+        return true;
+    }
+
+    int kind = PyUnicode_KIND(str);
+    const void *data = PyUnicode_DATA(str);
+    for (Py_ssize_t i = 0; i < len; i++) {
+        Py_UCS4 ch = PyUnicode_READ(kind, data, i);
+        if (!Py_UNICODE_ISALPHA(ch))
+            return false;
+    }
+    return true;
+}
+
 static inline int CPy_ASCII_Lower(unsigned char c) { return Py_TOLOWER(c); }
 static inline int CPy_ASCII_Upper(unsigned char c) { return Py_TOUPPER(c); }
 
@@ -739,9 +762,15 @@ static inline PyObject *CPyStr_ChangeCase(PyObject *self,
 #endif
 }
 
+static PyObject *_lower_str = NULL;
+static PyObject *_upper_str = NULL;
+
 PyObject *CPyStr_Lower(PyObject *self) {
 #if CPY_3_13_FEATURES
-    return CPyStr_ChangeCase(self, CPy_ASCII_Lower, mypyc_interned_str.lower);
+    if (_lower_str == NULL) {
+        _lower_str = PyUnicode_InternFromString("lower");
+    }
+    return CPyStr_ChangeCase(self, CPy_ASCII_Lower, _lower_str);
 #else
     return CPyStr_ChangeCase(self, CPy_ASCII_Lower, _PyUnicode_ToLowerFull);
 #endif
@@ -749,7 +778,10 @@ PyObject *CPyStr_Lower(PyObject *self) {
 
 PyObject *CPyStr_Upper(PyObject *self) {
 #if CPY_3_13_FEATURES
-    return CPyStr_ChangeCase(self, CPy_ASCII_Upper, mypyc_interned_str.upper);
+    if (_upper_str == NULL) {
+        _upper_str = PyUnicode_InternFromString("upper");
+    }
+    return CPyStr_ChangeCase(self, CPy_ASCII_Upper, _upper_str);
 #else
     return CPyStr_ChangeCase(self, CPy_ASCII_Upper, _PyUnicode_ToUpperFull);
 #endif

@@ -81,8 +81,10 @@ from mypyc.ir.rtypes import (
     RTuple,
     RVec,
     bool_rprimitive,
+    char_rprimitive,
     int_rprimitive,
     is_any_int,
+    is_char_rprimitive,
     is_fixed_width_rtype,
     is_int64_rprimitive,
     is_int_rprimitive,
@@ -91,6 +93,7 @@ from mypyc.ir.rtypes import (
     is_object_rprimitive,
     object_rprimitive,
     set_rprimitive,
+    short_int_rprimitive,
 )
 from mypyc.irbuild.ast_helpers import is_borrow_friendly_expr, process_conditional
 from mypyc.irbuild.builder import IRBuilder, int_borrow_friendly_op
@@ -115,6 +118,7 @@ from mypyc.irbuild.specialize import (
     apply_method_specialization,
     translate_object_new,
     translate_object_setattr,
+    try_emit_str_index_as_int,
 )
 from mypyc.irbuild.vec import (
     vec_append,
@@ -838,6 +842,60 @@ def precompute_set_literal(builder: IRBuilder, s: SetExpr) -> Value | None:
     return None
 
 
+def try_specialize_str_char_compare(
+    builder: IRBuilder, op: str, lhs: Expression, rhs: Expression, line: int
+) -> Value | None:
+    """Specialize ``s[i] == 'x'`` / ``s[i] != 'x'`` where ``'x'`` is a 1-char
+    string literal and ``s: str``, ``i`` is int-like.
+
+    Rewrites the comparison to an integer compare of the codepoint, avoiding
+    allocation of a single-char PyObject and the full PyUnicode_Compare path.
+    """
+    for index_side, literal_side in ((lhs, rhs), (rhs, lhs)):
+        if not isinstance(index_side, IndexExpr):
+            continue
+        folded = constant_fold_expr(builder, literal_side)
+        if not isinstance(folded, str) or len(folded) != 1:
+            continue
+        char_int = try_emit_str_index_as_int(builder, index_side)
+        if char_int is None:
+            continue
+        literal_int = Integer(ord(folded), short_int_rprimitive, line)
+        return builder.binary_op(char_int, literal_int, op, line)
+    return None
+
+
+def try_specialize_char_compare(
+    builder: IRBuilder, op: str, lhs: Expression, rhs: Expression, line: int
+) -> Value | None:
+    """Specialize ``char == char`` and ``char == 1-char-str-literal``
+    (and the != variants, and symmetric orderings) to int compare of the
+    underlying codepoint.
+    """
+    if op not in ("==", "!="):
+        return None
+    lhs_type = builder.node_type(lhs)
+    rhs_type = builder.node_type(rhs)
+    # char == char
+    if is_char_rprimitive(lhs_type) and is_char_rprimitive(rhs_type):
+        l_val = builder.accept(lhs)
+        r_val = builder.accept(rhs)
+        return builder.binary_op(l_val, r_val, op, line)
+    # char == <0- or 1-char str literal> (and symmetric). Empty string "" is
+    # encoded as the char empty sentinel -1; any 1-char literal is its ord.
+    for char_side, char_type, lit_side in ((lhs, lhs_type, rhs), (rhs, rhs_type, lhs)):
+        if not is_char_rprimitive(char_type):
+            continue
+        folded = constant_fold_expr(builder, lit_side)
+        if not isinstance(folded, str) or len(folded) > 1:
+            continue
+        char_val = builder.accept(char_side)
+        codepoint_val = -1 if len(folded) == 0 else ord(folded)
+        codepoint = Integer(codepoint_val, char_rprimitive, line)
+        return builder.binary_op(char_val, codepoint, op, line)
+    return None
+
+
 def transform_comparison_expr(builder: IRBuilder, e: ComparisonExpr) -> Value:
     # x in (...)/[...]
     # x not in (...)/[...]
@@ -848,6 +906,15 @@ def transform_comparison_expr(builder: IRBuilder, e: ComparisonExpr) -> Value:
             return result
 
     if len(e.operators) == 1:
+        # Codepoint fast paths for equality:
+        #   char == char / char == "c"   -> int compare
+        #   s[i] == "c"                  -> int compare against codepoint
+        if first_op in ("==", "!="):
+            for specializer in (try_specialize_char_compare, try_specialize_str_char_compare):
+                result = specializer(builder, first_op, e.operands[0], e.operands[1], e.line)
+                if result is not None:
+                    return result
+
         # Special some common simple cases
         if first_op in ("is", "is not"):
             right_expr = e.operands[1]

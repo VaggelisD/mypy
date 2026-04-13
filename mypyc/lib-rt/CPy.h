@@ -785,9 +785,40 @@ CPyTagged CPyStr_Ord(PyObject *obj);
 PyObject *CPyStr_Multiply(PyObject *str, CPyTagged count);
 PyObject *CPyStr_Lower(PyObject *str);
 PyObject *CPyStr_Upper(PyObject *str);
+// Unbox a Python object to a char codepoint (int32). Accepts a 0- or
+// 1-character str. Empty str -> -1 (the empty sentinel). 1-char str ->
+// the codepoint (0..0x10FFFF). Anything else raises TypeError/ValueError
+// and returns -113 (mypyc's generic error sentinel for signed ints).
+#define CPY_CHAR_EMPTY  (-1)
+static inline int32_t CPyChar_FromObject(PyObject *obj) {
+    if (!PyUnicode_Check(obj)) {
+        PyErr_Format(PyExc_TypeError, "char expected, got %.50s", Py_TYPE(obj)->tp_name);
+        return -113;
+    }
+    Py_ssize_t n = PyUnicode_GET_LENGTH(obj);
+    if (n == 0) return CPY_CHAR_EMPTY;
+    if (n != 1) {
+        PyErr_SetString(PyExc_ValueError, "char expects a 0- or 1-character string");
+        return -113;
+    }
+    return (int32_t)PyUnicode_READ_CHAR(obj, 0);
+}
+
+// Box a char to a 1-char str, or "" for the empty sentinel. Uses
+// PyUnicode_FromStringAndSize("", 0) for empty, which returns the interned
+// empty string singleton, and PyUnicode_FromOrdinal for codepoints (cached
+// for latin-1 range).
+static inline PyObject *CPyChar_ToStr(int32_t c) {
+    if (c == CPY_CHAR_EMPTY) {
+        return PyUnicode_FromStringAndSize("", 0);
+    }
+    return PyUnicode_FromOrdinal((int)c);
+}
+
 bool CPyStr_IsSpace(PyObject *str);
 bool CPyStr_IsAlnum(PyObject *str);
 bool CPyStr_IsDigit(PyObject *str);
+bool CPyStr_IsAlpha(PyObject *str);
 
 // Bytes operations
 
