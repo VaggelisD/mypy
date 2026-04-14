@@ -369,6 +369,7 @@ def gen_func_ir(
                 is_coroutine=func_decl.is_coroutine,
                 implicit=func_decl.implicit,
                 internal=func_decl.internal,
+                arena=func_decl.arena,
             )
             func_ir = FuncIR(func_decl, args, blocks, fitem.line, traceback_name=fitem.name)
         else:

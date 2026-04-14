@@ -156,6 +156,7 @@ class FuncDecl:
         is_coroutine: bool = False,
         implicit: bool = False,
         internal: bool = False,
+        arena: bool = False,
     ) -> None:
         self.name = name
         self.class_name = class_name
@@ -166,6 +167,7 @@ class FuncDecl:
         self.is_prop_getter = is_prop_getter
         self.is_generator = is_generator
         self.is_coroutine = is_coroutine
+        self.arena = arena
         if class_name is None:
             self.bound_sig: FuncSignature | None = None
         else:
@@ -228,6 +230,7 @@ class FuncDecl:
             "is_coroutine": self.is_coroutine,
             "implicit": self.implicit,
             "internal": self.internal,
+            "arena": self.arena,
         }
 
     # TODO: move this to FuncIR?
@@ -253,6 +256,7 @@ class FuncDecl:
             is_coroutine=data["is_coroutine"],
             implicit=data["implicit"],
             internal=data["internal"],
+            arena=data.get("arena", False),
         )
 
 

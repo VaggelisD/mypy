@@ -33,14 +33,26 @@ from mypy.types import FINAL_DECORATOR_NAMES
 from mypyc.errors import Errors
 
 MYPYC_ATTRS: Final[frozenset[MypycAttr]] = frozenset(
-    ["native_class", "allow_interpreted_subclasses", "serializable", "free_list_len", "acyclic"]
+    [
+        "native_class",
+        "allow_interpreted_subclasses",
+        "serializable",
+        "free_list_len",
+        "acyclic",
+        "arena",
+    ]
 )
 
 DATACLASS_DECORATORS: Final = frozenset(["dataclasses.dataclass", "attr.s", "attr.attrs"])
 
 
 MypycAttr = Literal[
-    "native_class", "allow_interpreted_subclasses", "serializable", "free_list_len", "acyclic"
+    "native_class",
+    "allow_interpreted_subclasses",
+    "serializable",
+    "free_list_len",
+    "acyclic",
+    "arena",
 ]
 
 
@@ -50,6 +62,7 @@ class MypycAttrs(TypedDict):
     serializable: NotRequired[bool]
     free_list_len: NotRequired[int]
     acyclic: NotRequired[bool]
+    arena: NotRequired[bool]
 
 
 def is_final_decorator(d: Expression) -> bool:

@@ -264,6 +264,9 @@ def generate_class(cl: ClassIR, module: str, emitter: Emitter) -> None:
 
     if generate_full:
         fields["tp_dealloc"] = f"(destructor){name_prefix}_dealloc"
+        # Stamp bump-allocated instances immortal under arena so tp_dealloc
+        # never runs and no cache receives bump pointers.
+        fields["tp_alloc"] = "(allocfunc)_CPy_arena_stamp_alloc"
         if not cl.is_acyclic:
             fields["tp_traverse"] = f"(traverseproc){name_prefix}_traverse"
             fields["tp_clear"] = f"(inquiry){name_prefix}_clear"
@@ -609,11 +612,12 @@ def generate_setup_for_class(
     emitter: Emitter,
 ) -> None:
     """Generate a native function that allocates an instance of a class."""
+    struct_name = cl.struct_name(emitter.names)
+
     emitter.emit_line(native_function_header(cl.setup, emitter))
     emitter.emit_line("{")
     type_arg_name = REG_PREFIX + cl.setup.sig.args[0].name
     emitter.emit_line(f"PyTypeObject *type = (PyTypeObject*){type_arg_name};")
-    struct_name = cl.struct_name(emitter.names)
     emitter.emit_line(f"{struct_name} *self;")
 
     prefix = cl.name_prefix(emitter.names)

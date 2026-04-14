@@ -63,6 +63,8 @@ from mypyc.ir.rtypes import (
 from mypyc.irbuild.mapper import Mapper
 from mypyc.irbuild.util import (
     get_func_def,
+    get_mypyc_attr_call,
+    get_mypyc_attr_literal,
     get_mypyc_attrs,
     is_dataclass,
     is_extension_class,
@@ -128,8 +130,10 @@ def build_type_map(
     # so that we can easily pick out the right copy of a function that
     # is conditionally defined. This doesn't include nested functions!
     for module in modules:
-        for func in get_module_func_defs(module):
-            prepare_func_def(module.fullname, None, func, mapper, options)
+        for func, decorators in get_module_func_defs(module):
+            prepare_func_def(
+                module.fullname, None, func, mapper, options, decorators=decorators
+            )
             # TODO: what else?
 
     # Check for incompatible attribute definitions that were not
@@ -172,13 +176,17 @@ def load_type_map(mapper: Mapper, modules: list[MypyFile], deser_ctx: DeserMaps)
                 mapper.func_to_decl[node.node] = ir.ctor
 
     for module in modules:
-        for func in get_module_func_defs(module):
+        for func, _decorators in get_module_func_defs(module):
             func_id = get_id_from_name(func.name, func.fullname, func.line)
             mapper.func_to_decl[func] = deser_ctx.functions[func_id].decl
 
 
-def get_module_func_defs(module: MypyFile) -> Iterable[FuncDef]:
-    """Collect all of the (non-method) functions declared in a module."""
+def get_module_func_defs(module: MypyFile) -> Iterable[tuple[FuncDef, list[Expression]]]:
+    """Collect all of the (non-method) functions declared in a module.
+
+    Yields (FuncDef, decorators) pairs. The decorators list is empty
+    if the function is not wrapped in a Decorator/OverloadedFuncDef.
+    """
     for node in module.names.values():
         # We need to filter out functions that are imported or
         # aliases.  The best way to do this seems to be by
@@ -186,7 +194,21 @@ def get_module_func_defs(module: MypyFile) -> Iterable[FuncDef]:
         if isinstance(node.node, (FuncDef, Decorator, OverloadedFuncDef)) and is_from_module(
             node.node, module
         ):
-            yield get_func_def(node.node)
+            decorators: list[Expression] = []
+            if isinstance(node.node, Decorator):
+                decorators = node.node.decorators
+            yield get_func_def(node.node), decorators
+
+
+def _has_arena_attr(decorators: list[Expression]) -> bool:
+    for dec in decorators:
+        call = get_mypyc_attr_call(dec)
+        if call is None:
+            continue
+        for name, arg in zip(call.arg_names, call.args):
+            if name == "arena" and get_mypyc_attr_literal(arg) is True:
+                return True
+    return False
 
 
 def prepare_func_def(
@@ -195,6 +217,7 @@ def prepare_func_def(
     fdef: FuncDef,
     mapper: Mapper,
     options: CompilerOptions,
+    decorators: list[Expression] | None = None,
 ) -> FuncDecl:
     kind = (
         FUNC_CLASSMETHOD
@@ -202,6 +225,7 @@ def prepare_func_def(
         else (FUNC_STATICMETHOD if fdef.is_static else FUNC_NORMAL)
     )
     sig = mapper.fdef_to_sig(fdef, options.strict_dunders_typing)
+    arena = _has_arena_attr(decorators) if decorators else False
     decl = FuncDecl(
         fdef.name,
         class_name,
@@ -210,6 +234,7 @@ def prepare_func_def(
         kind,
         is_generator=fdef.is_generator,
         is_coroutine=fdef.is_coroutine,
+        arena=arena,
     )
     mapper.func_to_decl[fdef] = decl
     return decl
@@ -263,7 +288,9 @@ def prepare_method_def(
     elif isinstance(node, Decorator):
         # TODO: do something about abstract methods here. Currently, they are handled just like
         # normal methods.
-        decl = prepare_func_def(module_name, cdef.name, node.func, mapper, options)
+        decl = prepare_func_def(
+            module_name, cdef.name, node.func, mapper, options, decorators=node.decorators
+        )
         if not node.decorators:
             ir.method_decls[node.name] = decl
         elif isinstance(node.decorators[0], MemberExpr) and node.decorators[0].name == "setter":

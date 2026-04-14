@@ -112,9 +112,12 @@ def generate_native_function(
     names = generate_names_for_ir(fn.arg_regs, fn.blocks)
     body = Emitter(emitter.context, names)
     visitor = FunctionEmitterVisitor(body, declarations, source_path, module_name)
+    visitor.arena = fn.decl.arena
 
     declarations.emit_line(f"{native_function_header(fn.decl, emitter)} {{")
     body.indent()
+    if fn.decl.arena:
+        body.emit_line("_CPy_arena_enter();")
 
     for r in all_values(fn.arg_regs, fn.blocks):
         if isinstance(r.type, RTuple):
@@ -201,6 +204,9 @@ class FunctionEmitterVisitor(OpVisitor[None]):
         self.ops: list[Op] = []
         # Current index within ops; visit methods can increment this to skip/merge ops
         self.op_index = 0
+        # Set by caller when emitting an @mypyc_attr(arena=True) function;
+        # causes _CPy_arena_exit() to be emitted before each return.
+        self.arena = False
 
     def temp_name(self) -> str:
         return self.emitter.temp_name()
@@ -270,6 +276,11 @@ class FunctionEmitterVisitor(OpVisitor[None]):
 
     def visit_return(self, op: Return) -> None:
         value_str = self.reg(op.value)
+        if self.arena:
+            if not op.value.type.is_unboxed and op.value.type.is_refcounted:
+                self.emit_line(f"return _CPy_arena_exit_obj((PyObject *){value_str});")
+                return
+            self.emit_line("_CPy_arena_exit();")
         self.emit_line("return %s;" % value_str)
 
     def visit_tuple_set(self, op: TupleSet) -> None:

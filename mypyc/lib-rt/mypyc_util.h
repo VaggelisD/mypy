@@ -159,7 +159,6 @@ static inline CPyTagged CPyTagged_ShortFromSsize_t(Py_ssize_t x) {
 // Are we targeting Python 3.X or newer?
 #define CPY_3_11_FEATURES (PY_VERSION_HEX >= 0x030b0000)
 #define CPY_3_12_FEATURES (PY_VERSION_HEX >= 0x030c0000)
-#define CPY_3_14_FEATURES (PY_VERSION_HEX >= 0x030e0000)
 
 #if CPY_3_12_FEATURES
 
@@ -195,5 +194,121 @@ static inline CPyTagged CPyTagged_ShortFromSsize_t(Py_ssize_t x) {
 
 // Are we targeting Python 3.14 or newer?
 #define CPY_3_14_FEATURES (PY_VERSION_HEX >= 0x030e0000)
+
+// ---------------------------------------------------------------------
+// Arena (@mypyc_attr(arena=True))
+//
+// All PyObject_Malloc / PyMem_Malloc calls inside an @arena function body
+// route to a thread-local bump allocator installed at module init. Bump
+// pointers live only for the arena scope — @arena functions must return
+// None (see _CPy_arena_exit_obj below).
+//
+// Bodies bracket themselves with _CPy_arena_enter / _exit. At outermost
+// enter we swap gen-0 to a private empty list, snapshot+block the
+// freelists, and disable auto-gc. At exit we restore everything, reset
+// chunks to the pool, and re-enable gc. Full rationale in arena.c.
+// ---------------------------------------------------------------------
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+extern CPyThreadLocal int _CPy_arena_active;
+extern CPyThreadLocal int _CPy_arena_saved_gc_enabled;
+void _CPy_arena_install(void);
+void _CPy_arena_reset(void);
+void _CPy_arena_swap_in(void);
+void _CPy_arena_swap_out(void);
+void _CPy_arena_freelists_save_and_block(void);
+void _CPy_arena_freelists_restore(void);
+PyObject *_CPy_arena_stamp_alloc(PyTypeObject *tp, Py_ssize_t nitems);
+#ifdef __cplusplus
+}
+#endif
+
+static inline void _CPy_arena_enter(void) {
+    if (_CPy_arena_active == 0) {
+        _CPy_arena_swap_in();
+        _CPy_arena_freelists_save_and_block();
+    }
+    _CPy_arena_active++;
+}
+
+static inline void _CPy_arena_exit(void) {
+    if (--_CPy_arena_active == 0) {
+        _CPy_arena_freelists_restore();
+        _CPy_arena_swap_out();
+        _CPy_arena_reset();
+        if (_CPy_arena_saved_gc_enabled) PyGC_Enable();
+    }
+}
+
+// Stub. @arena functions returning a refcounted value are unsupported —
+// the pointer points into soon-to-be-reset bump memory. Codegen still
+// emits this for typed returns (see mypyc/codegen/emitfunc.py); we do
+// the normal teardown and return retval verbatim. Caller access is UB.
+static inline PyObject *_CPy_arena_exit_obj(PyObject *retval) {
+    _CPy_arena_exit();
+    return retval;
+}
+
+// Stamp an allocation's refcount immortal when the arena is active, so
+// Py_DECREF never reaches tp_dealloc and the object never hits our free
+// hook. Three variants avoid a PyObject_IS_GC call on the hot path:
+//   _gc     — type is always GC-tracked (list/dict/tuple/set)
+//   _nongc  — type is never GC-tracked (int/float/str/bytes)
+//   _any    — mixed (generic tp_alloc); checks at runtime
+// mypyc classes get the same treatment via `_CPy_arena_stamp_alloc`
+// installed on tp_alloc; the macros below cover libpython allocators
+// called from mypyc-compiled code.
+static inline PyObject *_CPy_arena_stamp_gc(PyObject *op) {
+    if (op != NULL && _CPy_arena_active) {
+        Py_SET_REFCNT(op, _Py_IMMORTAL_INITIAL_REFCNT);
+        PyObject_GC_UnTrack(op);
+    }
+    return op;
+}
+static inline PyObject *_CPy_arena_stamp_nongc(PyObject *op) {
+    if (op != NULL && _CPy_arena_active) {
+        Py_SET_REFCNT(op, _Py_IMMORTAL_INITIAL_REFCNT);
+    }
+    return op;
+}
+static inline PyObject *_CPy_arena_stamp_any(PyObject *op) {
+    if (op != NULL && _CPy_arena_active) {
+        Py_SET_REFCNT(op, _Py_IMMORTAL_INITIAL_REFCNT);
+        if (PyObject_IS_GC(op)) PyObject_GC_UnTrack(op);
+    }
+    return op;
+}
+
+// Wrap libpython's common allocators. C preprocessor's blue-paint rule
+// means the macro doesn't re-expand inside its own body, so the inner
+// call resolves to the real function.
+#define PyList_New(n)                       _CPy_arena_stamp_gc(PyList_New(n))
+#define PyDict_New()                        _CPy_arena_stamp_gc(PyDict_New())
+#define PyTuple_New(n)                      _CPy_arena_stamp_gc(PyTuple_New(n))
+#define PySet_New(it)                       _CPy_arena_stamp_gc(PySet_New(it))
+#define PyFrozenSet_New(it)                 _CPy_arena_stamp_gc(PyFrozenSet_New(it))
+
+#define PyLong_FromLong(v)                  _CPy_arena_stamp_nongc(PyLong_FromLong(v))
+#define PyLong_FromLongLong(v)              _CPy_arena_stamp_nongc(PyLong_FromLongLong(v))
+#define PyLong_FromSsize_t(v)               _CPy_arena_stamp_nongc(PyLong_FromSsize_t(v))
+#define PyLong_FromUnsignedLong(v)          _CPy_arena_stamp_nongc(PyLong_FromUnsignedLong(v))
+#define PyLong_FromUnsignedLongLong(v)      _CPy_arena_stamp_nongc(PyLong_FromUnsignedLongLong(v))
+#define PyLong_FromDouble(v)                _CPy_arena_stamp_nongc(PyLong_FromDouble(v))
+#define PyFloat_FromDouble(d)               _CPy_arena_stamp_nongc(PyFloat_FromDouble(d))
+#define PyBytes_FromString(s)               _CPy_arena_stamp_nongc(PyBytes_FromString(s))
+#define PyBytes_FromStringAndSize(s, n)     _CPy_arena_stamp_nongc(PyBytes_FromStringAndSize(s, n))
+#define PyUnicode_FromString(s)             _CPy_arena_stamp_nongc(PyUnicode_FromString(s))
+#define PyUnicode_FromStringAndSize(s, n)   _CPy_arena_stamp_nongc(PyUnicode_FromStringAndSize(s, n))
+#define PyUnicode_FromFormat(...)           _CPy_arena_stamp_nongc(PyUnicode_FromFormat(__VA_ARGS__))
+#define PyUnicode_Concat(a, b)              _CPy_arena_stamp_nongc(PyUnicode_Concat(a, b))
+#define PyUnicode_Substring(s, i, j)        _CPy_arena_stamp_nongc(PyUnicode_Substring(s, i, j))
+#define PyUnicode_Join(sep, seq)            _CPy_arena_stamp_nongc(PyUnicode_Join(sep, seq))
+#define PyUnicode_FromOrdinal(c)            _CPy_arena_stamp_nongc(PyUnicode_FromOrdinal(c))
+#define PyUnicode_New(size, maxchar)        _CPy_arena_stamp_nongc(PyUnicode_New(size, maxchar))
+
+// Generic: the result may or may not be GC-tracked depending on `t`.
+#define PyType_GenericAlloc(t, n)           _CPy_arena_stamp_any(PyType_GenericAlloc(t, n))
 
 #endif

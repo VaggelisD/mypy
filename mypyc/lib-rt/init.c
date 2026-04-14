@@ -22,4 +22,7 @@ void CPy_Init(void) {
             CPyError_OutOfMemory();
         }
     }
+
+    // Install the arena allocator hook (idempotent).
+    _CPy_arena_install();
 }

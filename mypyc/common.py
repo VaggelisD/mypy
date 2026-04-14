@@ -86,6 +86,7 @@ RUNTIME_C_FILES: Final = [
     "generic_ops.c",
     "pythonsupport.c",
     "function_wrapper.c",
+    "arena.c",
 ]
 
 # Python 3.12 introduced immortal objects, specified via a special reference count

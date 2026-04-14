@@ -230,8 +230,15 @@ parser_init(CPyArg_Parser *parser)
     }
 
     nkw = len - parser->pos;
+    // Cached kwtuple + interned name strings must outlive any arena call, so
+    // force heap allocation by suspending the arena scope here. The cached
+    // interned strings go into CPython's intern dict which persists forever.
+    // (_CPy_arena_active is declared in mypyc_util.h via CPy.h above.)
+    int saved_arena_active = _CPy_arena_active;
+    _CPy_arena_active = 0;
     kwtuple = PyTuple_New(nkw);
     if (kwtuple == NULL) {
+        _CPy_arena_active = saved_arena_active;
         return 0;
     }
     keywords = parser->keywords + parser->pos;
@@ -239,11 +246,13 @@ parser_init(CPyArg_Parser *parser)
         PyObject *str = PyUnicode_FromString(keywords[i]);
         if (str == NULL) {
             Py_DECREF(kwtuple);
+            _CPy_arena_active = saved_arena_active;
             return 0;
         }
         PyUnicode_InternInPlace(&str);
         PyTuple_SET_ITEM(kwtuple, i, str);
     }
+    _CPy_arena_active = saved_arena_active;
     parser->kwtuple = kwtuple;
 
     assert(parser->next == NULL);

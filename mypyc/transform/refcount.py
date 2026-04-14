@@ -62,6 +62,15 @@ def insert_ref_count_opcodes(ir: FuncIR) -> None:
 
     This is the entry point to this module.
     """
+    if ir.decl.arena:
+        # Arena functions skip refcount insertion entirely. Allocations are
+        # stamped immortal at runtime so leaks are intentional and aliasing
+        # is safe. Strip KeepAlive ops since codegen still needs that cleanup.
+        for block in ir.blocks:
+            block.ops = [op for op in block.ops if not isinstance(op, KeepAlive)]
+        cleanup_cfg(ir.blocks)
+        return
+
     cfg = get_cfg(ir.blocks)
     values = all_values(ir.arg_regs, ir.blocks)
 
