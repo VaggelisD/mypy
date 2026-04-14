@@ -6014,3 +6014,200 @@ assert NonExtDict.BASE == {"x": 1}
 assert NonExtDict.EXTENDED == {"x": 1, "y": 2}
 
 assert NonExtChained.Z == {10, 20, 30}
+
+[case testCompiledSubclassAttrAccessWithAllowInterpretedSubclasses]
+# Test that compiled subclasses of a class with allow_interpreted_subclasses=True
+# can correctly access parent instance attributes via direct struct access
+# (not falling back to PyObject_GenericGetAttr).
+from mypy_extensions import mypyc_attr
+from typing import Any
+
+@mypyc_attr(allow_interpreted_subclasses=True)
+class Base:
+    def __init__(self, x: int, name: str) -> None:
+        self.x = x
+        self.name = name
+
+    def get_x(self) -> int:
+        return self.x
+
+    def get_name(self) -> str:
+        return self.name
+
+    def compute(self) -> int:
+        return self.x * 2
+
+@mypyc_attr(allow_interpreted_subclasses=True)
+class Child(Base):
+    def __init__(self, x: int, name: str, y: int) -> None:
+        super().__init__(x, name)
+        self.y = y
+
+    def compute(self) -> int:
+        # Access parent attr (self.x) from an overridden method
+        return self.x + self.y
+
+    def get_both(self) -> int:
+        # Access both parent and own attrs
+        return self.x + self.y
+
+@mypyc_attr(allow_interpreted_subclasses=True)
+class GrandChild(Child):
+    def __init__(self, x: int, name: str, y: int, z: int) -> None:
+        super().__init__(x, name, y)
+        self.z = z
+
+    def compute(self) -> int:
+        # Access grandparent attr from two levels down
+        return self.x + self.y + self.z
+
+def test_compiled_subclass_attr_access() -> None:
+    b = Base(10, "base")
+    assert b.get_x() == 10
+    assert b.get_name() == "base"
+    assert b.compute() == 20
+
+    c = Child(10, "child", 5)
+    assert c.get_x() == 10       # inherited method accessing parent attr
+    assert c.get_name() == "child"
+    assert c.compute() == 15     # overridden method accessing parent attr
+    assert c.get_both() == 15
+
+    g = GrandChild(10, "grand", 5, 3)
+    assert g.get_x() == 10       # inherited from grandparent
+    assert g.get_name() == "grand"
+    assert g.compute() == 18     # accessing attrs from all levels
+
+    # Also verify through base type reference (vtable dispatch)
+    ref: Base = Child(7, "ref", 3)
+    assert ref.get_x() == 7
+    assert ref.compute() == 10
+
+[file driver.py]
+from native import test_compiled_subclass_attr_access
+test_compiled_subclass_attr_access()
+
+[case testGuardedDirectMethodCallWithAllowInterpretedSubclasses]
+# Test that method calls on classes with allow_interpreted_subclasses use
+# guarded direct calls for methods not overridden by compiled subclasses,
+# while still dispatching correctly for interpreted subclasses.
+from mypy_extensions import mypyc_attr
+from typing import Any
+
+@mypyc_attr(allow_interpreted_subclasses=True)
+class Base:
+    def __init__(self, x: int) -> None:
+        self.x = x
+
+    def base_only(self) -> int:
+        """Not overridden by any compiled subclass — should get a direct call."""
+        return self.x
+
+    def overridden(self) -> int:
+        """Overridden by Child — must go through vtable."""
+        return self.x * 10
+
+    def calls_base_only(self) -> int:
+        """Calls a non-overridden method via self."""
+        return self.base_only() + 1
+
+    def calls_overridden(self) -> int:
+        """Calls an overridden method via self — must dispatch correctly."""
+        return self.overridden() + 1
+
+@mypyc_attr(allow_interpreted_subclasses=True)
+class Child(Base):
+    def __init__(self, x: int, y: int) -> None:
+        super().__init__(x)
+        self.y = y
+
+    def overridden(self) -> int:
+        return self.x + self.y
+
+def test_compiled_direct_calls() -> None:
+    b = Base(5)
+    assert b.base_only() == 5
+    assert b.overridden() == 50
+    assert b.calls_base_only() == 6
+    assert b.calls_overridden() == 51
+
+    c = Child(5, 3)
+    assert c.base_only() == 5        # inherited, non-overridden
+    assert c.overridden() == 8       # overridden in Child
+    assert c.calls_base_only() == 6  # inherited method calling non-overridden
+    assert c.calls_overridden() == 9 # inherited method calling overridden — must dispatch to Child
+
+    # Through base type reference — vtable dispatch
+    ref: Base = Child(10, 7)
+    assert ref.base_only() == 10
+    assert ref.overridden() == 17
+    assert ref.calls_base_only() == 11
+    assert ref.calls_overridden() == 18
+
+[file driver.py]
+from native import Base, Child, test_compiled_direct_calls
+
+# Test compiled instances
+test_compiled_direct_calls()
+
+# Test interpreted subclass that overrides a "final among compiled" method
+class InterpChild(Base):
+    def base_only(self) -> int:
+        return self.x * 100
+
+ic = InterpChild(3)
+assert ic.base_only() == 300        # interpreted override
+assert ic.calls_base_only() == 301  # must dispatch to interpreted override via vtable
+
+# Test interpreted subclass that overrides an already-overridden method
+class InterpGrand(Child):
+    def overridden(self) -> int:
+        return -1
+
+ig = InterpGrand(5, 3)
+assert ig.overridden() == -1
+assert ig.calls_overridden() == 0  # -1 + 1
+
+[case testPropertyGetterLeak]
+class Bar:
+    pass
+
+class Foo:
+    def __init__(self) -> None:
+        self.obj: object = Bar()
+
+    @property
+    def val(self) -> object:
+        return self.obj
+
+[file other.py]
+import gc
+from native import Foo, Bar
+
+def check(foo: Foo) -> bool:
+    return isinstance(foo.val, Bar)
+
+def test_property_getter_no_leak() -> None:
+    foo = Foo()
+    gc.collect()
+    before = gc.get_objects()
+    for _ in range(100):
+        check(foo)
+    gc.collect()
+    after = gc.get_objects()
+    diff = len(after) - len(before)
+    assert diff <= 2, diff
+
+test_property_getter_no_leak()
+
+[file driver.py]
+import sys
+from other import check
+from native import Foo
+
+foo = Foo()
+init = sys.getrefcount(foo.obj)
+for _ in range(100):
+    check(foo)
+after = sys.getrefcount(foo.obj)
+assert after - init == 0, f"Leaked {after - init} refs"
