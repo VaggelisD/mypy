@@ -190,6 +190,12 @@ MYPYC_NATIVE_INT_NAMES: Final = (
     "mypy_extensions.u8",
 )
 
+# Mypyc native char type (compatible with builtins.str). str values are
+# implicitly usable where a ``char`` is expected (and vice versa), similar to
+# how int<->i64 works. Under mypyc, ``char`` is stored unboxed as an int32
+# codepoint with -1 as the empty-string sentinel.
+MYPYC_NATIVE_CHAR_NAMES: Final = ("mypy_extensions.char",)
+
 DATACLASS_TRANSFORM_NAMES: Final = (
     "typing.dataclass_transform",
     "typing_extensions.dataclass_transform",
