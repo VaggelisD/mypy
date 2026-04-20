@@ -21,6 +21,10 @@ from mypyc.options import CompilerOptions
 
 STR_INDEXERS = {
     "CPyStr_GetItem": "CPyStr_GetCharAt",
+    # The unsafe variant fires for patterns like ``for c in s: ...`` where
+    # c is typed as char — mypyc emits CPyStr_GetItemUnsafe for str
+    # iteration, then unboxes the 1-char result to char.
+    "CPyStr_GetItemUnsafe": "CPyStr_GetCharAtUnsafe",
 }
 
 

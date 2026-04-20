@@ -49,6 +49,13 @@ static inline int32_t CPyStr_GetCharAt(PyObject *s, CPyTagged index_tagged) {
     return (int32_t)PyUnicode_READ(PyUnicode_KIND(s), PyUnicode_DATA(s), i);
 }
 
+// Unsafe variant: no bounds check, takes a raw Py_ssize_t index (matching
+// CPyStr_GetItemUnsafe's signature). Used by char_str_index_fold when the
+// caller — typically a str iteration — already guarantees the bounds.
+static inline int32_t CPyStr_GetCharAtUnsafe(PyObject *s, Py_ssize_t i) {
+    return (int32_t)PyUnicode_READ(PyUnicode_KIND(s), PyUnicode_DATA(s), i);
+}
+
 // char-codepoint classification. Each helper takes a raw int32 codepoint;
 // negative values (empty sentinel, invalid input) return false. The
 // Py_UNICODE_IS* macros have their own ASCII fast paths.

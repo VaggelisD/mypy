@@ -270,6 +270,26 @@ def test_str_index_compare() -> None:
     assert compare_index_ne(s, 0, "x")
     assert not compare_index_ne(s, 0, "h")
 
+[case testCharForLoop]
+from mypy_extensions import char
+
+def count_spaces(s: str) -> int:
+    # mypyc emits CPyStr_GetItemUnsafe for str iteration. char_str_index_fold
+    # rewrites the Unbox(GetItemUnsafe -> char) to CPyStr_GetCharAtUnsafe,
+    # eliminating the 1-char PyObject allocation per iteration.
+    n = 0
+    c: char = char("")
+    for c in s:
+        if c == " ":
+            n += 1
+    return n
+
+def test_for_loop() -> None:
+    assert count_spaces("") == 0
+    assert count_spaces("no spaces") == 1
+    assert count_spaces("a b c d") == 3
+    assert count_spaces("   ") == 3
+
 [case testStrIndexIsMethod]
 # s[i].isX() is specialized into a direct codepoint read + char is* helper,
 # avoiding the 1-char PyObject allocation.
