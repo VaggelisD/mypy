@@ -144,6 +144,7 @@ from mypyc.primitives.str_ops import (
     str_encode_ascii_strict,
     str_encode_latin1_strict,
     str_encode_utf8_strict,
+    str_get_char_at_op,
     str_get_item_unsafe_as_int_op,
     str_range_check_op,
 )
@@ -1181,6 +1182,43 @@ def try_emit_str_index_as_int(builder: IRBuilder, index_expr: IndexExpr) -> Valu
         str_range_check_op,
         str_get_item_unsafe_as_int_op,
     )
+
+
+_CHAR_BOOL_METHODS = frozenset(
+    {"isspace", "isdigit", "isalnum", "isalpha", "isidentifier"}
+)
+
+
+@specialize_function("isspace", str_rprimitive)
+@specialize_function("isdigit", str_rprimitive)
+@specialize_function("isalnum", str_rprimitive)
+@specialize_function("isalpha", str_rprimitive)
+@specialize_function("isidentifier", str_rprimitive)
+def translate_str_index_char_method(
+    builder: IRBuilder, expr: CallExpr, callee: RefExpr
+) -> Value | None:
+    """Specialize ``s[i].isspace()`` (and .isdigit/isalnum/isalpha/isidentifier)
+    into a direct codepoint read + codepoint-level is* check, skipping the
+    1-char PyObject allocation and method dispatch through the str object.
+    """
+    if expr.args or not isinstance(callee, MemberExpr):
+        return None
+    if callee.name not in _CHAR_BOOL_METHODS:
+        return None
+    receiver = callee.expr
+    if not isinstance(receiver, IndexExpr):
+        return None
+    base_type = builder.node_type(receiver.base)
+    if not is_str_rprimitive(base_type):
+        return None
+    idx_type = builder.node_type(receiver.index)
+    if not (is_tagged(idx_type) or is_fixed_width_rtype(idx_type)):
+        return None
+    s = builder.accept(receiver.base)
+    i = builder.accept(receiver.index)
+    ch = builder.primitive_op(str_get_char_at_op, [s, i], expr.line)
+    # Route through the char method_op (CPyChar_IsSpace etc).
+    return builder.gen_method_call(ch, callee.name, [], bool_rprimitive, expr.line)
 
 
 @specialize_function("builtins.ord")

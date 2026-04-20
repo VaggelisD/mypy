@@ -595,6 +595,17 @@ str_get_item_unsafe_as_int_op = custom_primitive_op(
     dependencies=[STR_EXTRA_OPS],
 )
 
+# str[i] -> char, with bounds check (IndexError propagated via -113 sentinel).
+# Used by the s[i].isX() specializer to skip the 1-char PyObject alloc.
+str_get_char_at_op = custom_primitive_op(
+    name="str_get_char_at",
+    arg_types=[str_rprimitive, int_rprimitive],
+    return_type=char_rprimitive,
+    c_function_name="CPyStr_GetCharAt",
+    error_kind=ERR_MAGIC,
+    dependencies=[STR_EXTRA_OPS],
+)
+
 # method_ops on char receiver: route .isspace() / .isdigit() / ... to
 # codepoint-taking C helpers defined in str_extra_ops.h.
 method_op(

@@ -269,3 +269,60 @@ def test_str_index_compare() -> None:
     assert compare_index(s, 5, " ")
     assert compare_index_ne(s, 0, "x")
     assert not compare_index_ne(s, 0, "h")
+
+[case testStrIndexIsMethod]
+# s[i].isX() is specialized into a direct codepoint read + char is* helper,
+# avoiding the 1-char PyObject allocation.
+
+def idx_is_space(s: str, i: int) -> bool:
+    return s[i].isspace()
+
+def idx_is_digit(s: str, i: int) -> bool:
+    return s[i].isdigit()
+
+def idx_is_alnum(s: str, i: int) -> bool:
+    return s[i].isalnum()
+
+def idx_is_alpha(s: str, i: int) -> bool:
+    return s[i].isalpha()
+
+def idx_is_identifier(s: str, i: int) -> bool:
+    return s[i].isidentifier()
+
+def test_isspace_at() -> None:
+    assert idx_is_space(" x", 0)
+    assert idx_is_space("\tx", 0)
+    assert not idx_is_space("ax", 0)
+
+def test_isdigit_at() -> None:
+    assert idx_is_digit("0abc", 0)
+    assert idx_is_digit("9abc", 0)
+    assert not idx_is_digit("abc", 0)
+
+def test_isalnum_at() -> None:
+    assert idx_is_alnum("a!", 0)
+    assert idx_is_alnum("5!", 0)
+    assert not idx_is_alnum(" !", 0)
+
+def test_isalpha_at() -> None:
+    assert idx_is_alpha("a1", 0)
+    assert not idx_is_alpha("1a", 0)
+
+def test_isidentifier_at() -> None:
+    assert idx_is_identifier("a1", 0)
+    assert idx_is_identifier("_1", 0)
+    assert not idx_is_identifier("0a", 0)
+
+def test_index_error_propagates() -> None:
+    # The fast path uses CPyStr_GetCharAt which sets IndexError on
+    # out-of-range indices (via the -113 sentinel + ERR_MAGIC).
+    try:
+        idx_is_space("", 0)
+        assert False, "should raise"
+    except IndexError:
+        pass
+    try:
+        idx_is_space("abc", 10)
+        assert False, "should raise"
+    except IndexError:
+        pass
