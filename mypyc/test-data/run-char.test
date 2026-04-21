@@ -243,6 +243,32 @@ def test_promotion() -> None:
     s3: str = char_to_str(char(""))
     assert s3 == ""
 
+[case testCharIntCompare]
+from mypy_extensions import char
+
+def in_ascii(c: char) -> bool:
+    # 0 <= c < 128 uses __ge__(int) + __lt__(int) on char
+    return 0 <= c < 128
+
+def lt_literal(c: char) -> bool:
+    return c < 128
+
+def ge_literal(c: char) -> bool:
+    return c >= 0
+
+def test_int_compare() -> None:
+    assert in_ascii(char("a"))   # codepoint 97
+    assert in_ascii(char("\0"))  # codepoint 0
+    assert in_ascii(char("~"))   # codepoint 126
+    assert not in_ascii(char("\u00f1"))  # codepoint 241 (latin-1 ñ)
+    # Empty sentinel is -1, so 0 <= -1 is False
+    assert not in_ascii(char(""))
+    # Individual comparisons
+    assert lt_literal(char("a"))
+    assert not lt_literal(char("\u00f1"))
+    assert ge_literal(char("a"))
+    assert not ge_literal(char(""))
+
 [case testCharConcat]
 from mypy_extensions import char
 
