@@ -14,6 +14,7 @@ from mypyc.common import (
     FAST_ISINSTANCE_MAX_SUBCLASSES,
     HAVE_IMMORTAL,
     NATIVE_PREFIX,
+    PREFIX,
     REG_PREFIX,
     STATIC_PREFIX,
     TYPE_PREFIX,
@@ -330,6 +331,23 @@ class Emitter:
 
     def native_function_name(self, fn: FuncDecl) -> str:
         return f"{NATIVE_PREFIX}{fn.cname(self.names)}"
+
+    def native_function_call(self, fn: FuncDecl) -> str:
+        """Return the C expression for a call to `fn`'s native (CPyDef_) entry.
+
+        For cross-group references under `separate=True`, this prepends the
+        exports-table indirection (e.g. `exports_other.CPyDef_foo`). Same as
+        `native_function_name()` for in-group calls.
+        """
+        return f"{self.get_group_prefix(fn)}{NATIVE_PREFIX}{fn.cname(self.names)}"
+
+    def wrapper_function_call(self, fn: FuncDecl) -> str:
+        """Return the C expression for a call to `fn`'s Python-wrapper (CPyPy_) entry.
+
+        Like `native_function_call`, but for the PyObject-level wrapper that
+        boxes/unboxes arguments. Used from slot generators (tp_init, etc.).
+        """
+        return f"{self.get_group_prefix(fn)}{PREFIX}{fn.cname(self.names)}"
 
     def tuple_c_declaration(self, rtuple: RTuple) -> list[str]:
         result = [
