@@ -206,9 +206,7 @@ def transform_name_expr(builder: IRBuilder, expr: NameExpr) -> Value:
             return builder.py_get_attr(builder.class_body_obj, expr.name, expr.line)
         else:
             return builder.primitive_op(
-                dict_get_item_op,
-                [builder.class_body_obj, builder.load_str(expr.name)],
-                expr.line,
+                dict_get_item_op, [builder.class_body_obj, builder.load_str(expr.name)], expr.line
             )
 
     return builder.load_global(expr)
@@ -1190,9 +1188,7 @@ def transform_dictionary_comprehension(builder: IRBuilder, o: DictionaryComprehe
         return builder.none()
 
     if o in builder.comp_to_fitem:
-        return _translate_comprehension_with_scope(
-            builder, o, lambda: _dict_comp_body(builder, o)
-        )
+        return _translate_comprehension_with_scope(builder, o, lambda: _dict_comp_body(builder, o))
     return _dict_comp_body(builder, o)
 
 

@@ -848,12 +848,7 @@ def gen_glue_property(
 
 
 def gen_glue_property_setter(
-    builder: IRBuilder,
-    sig: FuncSignature,
-    target: FuncIR,
-    cls: ClassIR,
-    base: ClassIR,
-    line: int,
+    builder: IRBuilder, sig: FuncSignature, target: FuncIR, cls: ClassIR, base: ClassIR, line: int
 ) -> FuncIR:
     """Generate a shadow glue method for a property setter.
 
@@ -875,7 +870,7 @@ def gen_glue_property_setter(
 
     # Extract the property name from "__mypyc_setter__<name>"
     # mypyc encodes e.g. "_chunks" as "__mypyc_setter___3_chunks"
-    prop_name = target.name[len("__mypyc_setter__"):]
+    prop_name = target.name[len("__mypyc_setter__") :]
     # Decode mypyc's private name mangling: "_3_foo" -> "_foo", "_3foo" -> "_foo"
     if prop_name.startswith("_") and len(prop_name) > 1 and prop_name[1].isdigit():
         end_of_digits = 2
@@ -885,7 +880,11 @@ def gen_glue_property_setter(
 
     builder.primitive_op(
         py_setattr_op,
-        [self_arg, builder.load_str(prop_name), builder.coerce(value_arg, object_rprimitive, line)],
+        [
+            self_arg,
+            builder.load_str(prop_name),
+            builder.coerce(value_arg, object_rprimitive, line),
+        ],
         line,
     )
     # Return 1 (success). If py_setattr_op failed, the Python exception is set

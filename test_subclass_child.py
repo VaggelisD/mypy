@@ -1,4 +1,5 @@
 """Non-compiled child class — tests attribute override visibility."""
+
 from test_subclass_base import Base
 
 
@@ -17,7 +18,9 @@ def test() -> None:
     s = Sub()
     assert s.lookup("a") == 1
     result = s.lookup("c")
-    assert result == 3, f"Expected 3, got {result} — compiled method doesn't see subclass override!"
+    assert (
+        result == 3
+    ), f"Expected 3, got {result} — compiled method doesn't see subclass override!"
     assert s.check_flag(), "Expected True — compiled method doesn't see subclass override!"
     print("Sub OK — interpreted subclass overrides work!")
 

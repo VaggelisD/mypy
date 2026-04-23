@@ -644,9 +644,7 @@ class FunctionEmitterVisitor(OpVisitor[None]):
         obj_args = (
             []
             if method_decl.kind == FUNC_STATICMETHOD
-            else [f"(PyObject *)Py_TYPE({obj})"]
-            if method_decl.kind == FUNC_CLASSMETHOD
-            else [obj]
+            else [f"(PyObject *)Py_TYPE({obj})"] if method_decl.kind == FUNC_CLASSMETHOD else [obj]
         )
         args = ", ".join(obj_args + [self.reg(arg) for arg in op_args])
         mtype = native_function_type_from_decl(method_decl, self.emitter)
@@ -665,8 +663,7 @@ class FunctionEmitterVisitor(OpVisitor[None]):
                 and class_ir.is_method_final_among_compiled(name)
             )
             if use_guarded_direct:
-                lib = self.emitter.get_group_prefix(method.decl)
-                direct_call = f"{lib}{NATIVE_PREFIX}{method.cname(self.names)}({args})"
+                direct_call = f"{self.emitter.native_function_call(method_decl)}({args})"
                 self.emit_line(f"if (Py_TYPE({obj})->tp_flags & CPy_TPFLAGS_MYPYC_COMPILED) {{")
                 self.emit_line(f"{dest}{direct_call};")
                 self.emit_line("} else {")

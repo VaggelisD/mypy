@@ -4,13 +4,15 @@ The bug: setter shadow glue overwrites getter shadow glue because both
 use fdef.name as key. This shifts all subsequent vtable entries, so
 methods after properties get called at wrong indices -> segfault.
 """
+
+from typing import Callable, Optional
+
 from mypy_extensions import mypyc_attr
-from typing import List, Optional, Callable
 
 
 class Core:
     def __init__(self) -> None:
-        self.chunks: List[List[int]] = [[1, 2], [3, 4]]
+        self.chunks: list[list[int]] = [[1, 2], [3, 4]]
         self.sql: str = ""
         self.counter: int = 0
 
@@ -29,11 +31,11 @@ class Base:
         self._core.sql = value
 
     @property
-    def _chunks(self) -> List[List[int]]:
+    def _chunks(self) -> list[list[int]]:
         return self._core.chunks
 
     @_chunks.setter
-    def _chunks(self, value: List[List[int]]) -> None:
+    def _chunks(self, value: list[list[int]]) -> None:
         self._core.chunks = value
 
     @property
@@ -45,16 +47,16 @@ class Base:
         self._core.counter = value
 
     # Methods AFTER the properties — these will be at wrong vtable offsets
-    def parse(self, tokens: List[int], sql: str) -> List[int]:
+    def parse(self, tokens: list[int], sql: str) -> list[int]:
         return self._parse(tokens, sql)
 
-    def _parse(self, tokens: List[int], sql: str) -> List[int]:
+    def _parse(self, tokens: list[int], sql: str) -> list[int]:
         self.sql = sql
         self._chunks = [tokens]
         return self._parse_batch(lambda self: self._parse_item())
 
-    def _parse_batch(self, callback: Callable[["Base"], Optional[int]]) -> List[int]:
-        results: List[int] = []
+    def _parse_batch(self, callback: Callable[["Base"], Optional[int]]) -> list[int]:
+        results: list[int] = []
         for chunk in self._chunks:
             for item in chunk:
                 r = callback(self)
