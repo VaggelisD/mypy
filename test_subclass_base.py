@@ -1,6 +1,5 @@
 """Compiled base class."""
 
-
 from mypy_extensions import mypyc_attr
 
 
