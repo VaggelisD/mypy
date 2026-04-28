@@ -552,7 +552,7 @@ def mypyc_build(
     # Write out the generated C and collect the files for each group
     # Should this be here??
     group_cfilenames: list[tuple[list[str], list[str]]] = []
-    for cfiles in group_cfiles:
+    for (group_sources, group_name), cfiles in zip(groups, group_cfiles):
         cfilenames = []
         for cfile, ctext in cfiles:
             cfile = os.path.join(compiler_options.target_dir, cfile)
@@ -560,6 +560,23 @@ def mypyc_build(
                 write_file(cfile, ctext)
             if os.path.splitext(cfile)[1] == ".c":
                 cfilenames.append(cfile)
+
+        # Fully-cached mypy build (typical of pip's second setup.py invocation
+        # for the wheel-build phase): mypyc returns an empty ctext for the
+        # group, but the .c file from the previous run is still on disk.
+        # Reuse it so the resulting Extension isn't built with sources=[].
+        # Mirrors the path that GroupGenerator.generate_c_for_modules emits.
+        if not cfilenames and group_name is not None:
+            from mypyc.codegen.emitmodule import group_dir as _group_dir
+
+            short_suffix = "_" + exported_name(group_name.split(".")[-1])
+            existing = os.path.join(
+                compiler_options.target_dir,
+                _group_dir(group_name),
+                f"__native{short_suffix}.c",
+            )
+            if os.path.exists(existing):
+                cfilenames.append(existing)
 
         deps = [os.path.join(compiler_options.target_dir, dep) for dep in get_header_deps(cfiles)]
         group_cfilenames.append((cfilenames, deps))
