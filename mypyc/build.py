@@ -578,9 +578,7 @@ def mypyc_build(
 
             short_suffix = "_" + exported_name(group_name.split(".")[-1])
             existing = os.path.join(
-                compiler_options.target_dir,
-                _group_dir(group_name),
-                f"__native{short_suffix}.c",
+                compiler_options.target_dir, _group_dir(group_name), f"__native{short_suffix}.c"
             )
             if os.path.exists(existing):
                 cfilenames.append(existing)
