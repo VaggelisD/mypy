@@ -55,18 +55,11 @@ class TestHeaderDeps(unittest.TestCase):
         # was missed entirely and the consumer's .o was never invalidated
         # when the other group's struct layout shifted.
         cfile = "#include <Python.h>\n#include <lib/__native_functions.h>\n"
-        assert get_header_deps([("caller.c", cfile)]) == [
-            "Python.h",
-            "lib/__native_functions.h",
-        ]
+        assert get_header_deps([("caller.c", cfile)]) == ["Python.h", "lib/__native_functions.h"]
 
     def test_get_header_deps_mixed_and_whitespace(self) -> None:
         # The preprocessor tolerates whitespace and the leading-hash form.
-        cfile = (
-            '# include "a.h"\n'
-            '#  include  <b.h>\n'
-            '#include\t"c.h"\n'
-        )
+        cfile = '# include "a.h"\n#  include  <b.h>\n#include\t"c.h"\n'
         assert get_header_deps([("x.c", cfile)]) == ["a.h", "b.h", "c.h"]
 
     def test_resolve_walks_transitively_through_headers(self) -> None:

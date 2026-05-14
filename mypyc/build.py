@@ -515,9 +515,7 @@ def get_header_deps(cfiles: list[tuple[str, str]]) -> list[str]:
     return sorted(headers)
 
 
-def resolve_cfile_deps(
-    cfile_dir: str, direct_includes: list[str], target_dir: str
-) -> set[str]:
+def resolve_cfile_deps(cfile_dir: str, direct_includes: list[str], target_dir: str) -> set[str]:
     """Resolve a .c file's `#include` directives to on-disk paths, walking
     transitively through resolved headers.
 
