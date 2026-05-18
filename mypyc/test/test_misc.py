@@ -165,7 +165,9 @@ class TestHeaderDeps(unittest.TestCase):
             cross_group_h = os.path.join(provider_dir, "__native_provider.h")
 
             with open(consumer_c, "w") as f:
-                f.write('#include "__native_consumer.h"\n#include "__native_internal_consumer.h"\n')
+                f.write(
+                    '#include "__native_consumer.h"\n#include "__native_internal_consumer.h"\n'
+                )
             with open(consumer_h, "w") as f:
                 f.write("#include <Python.h>\n")
             with open(internal_h, "w") as f:
