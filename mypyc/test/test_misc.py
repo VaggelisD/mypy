@@ -182,7 +182,8 @@ class TestHeaderDeps(unittest.TestCase):
             # Without the fix: per_cfile_deps is never populated for the cached
             # group, so no dep resolution happens and Extension.depends is empty.
             deps_without_fix: set[str] = set()
-            for cfile_full, dep_names in []:  # empty — this is the pre-fix state
+            pre_fix_per_cfile_deps: list[tuple[str, list[tuple[bool, str]]]] = []
+            for cfile_full, dep_names in pre_fix_per_cfile_deps:
                 deps_without_fix.update(
                     resolve_cfile_deps(os.path.dirname(cfile_full), dep_names, tmp)
                 )
