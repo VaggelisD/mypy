@@ -46,6 +46,7 @@ from mypyc.codegen.emitwrapper import (
 )
 from mypyc.codegen.literals import Literals
 from mypyc.common import (
+    EXT_SUFFIX,
     IS_FREE_THREADED,
     MODULE_PREFIX,
     PREFIX,
@@ -56,7 +57,16 @@ from mypyc.common import (
     short_id_from_name,
 )
 from mypyc.errors import Errors
-from mypyc.ir.deps import LIBRT_BASE64, LIBRT_STRINGS, LIBRT_TIME, LIBRT_VECS, SourceDep
+from mypyc.ir.deps import (
+    LIBRT_BASE64,
+    LIBRT_RANDOM,
+    LIBRT_STRINGS,
+    LIBRT_TIME,
+    LIBRT_VECS,
+    Capsule,
+    HeaderDep,
+    SourceDep,
+)
 from mypyc.ir.func_ir import FuncIR
 from mypyc.ir.module_ir import ModuleIR, ModuleIRs, deserialize_modules
 from mypyc.ir.ops import DeserMaps, LoadLiteral
@@ -66,7 +76,6 @@ from mypyc.irbuild.mapper import Mapper
 from mypyc.irbuild.prepare import load_type_map
 from mypyc.namegen import NameGenerator, exported_name
 from mypyc.options import CompilerOptions
-from mypyc.transform.char_str_index_fold import do_char_str_index_fold
 from mypyc.transform.copy_propagation import do_copy_propagation
 from mypyc.transform.exceptions import insert_exception_handling
 from mypyc.transform.flag_elimination import do_flag_elimination
@@ -134,7 +143,7 @@ class MypycPlugin(Plugin):
                 self.group_map[id] = (name, modules)
 
         self.compiler_options = compiler_options
-        self.metastore = create_metastore(options)
+        self.metastore = create_metastore(options, parallel_worker=False)
 
     def report_config_data(self, ctx: ReportConfigContext) -> tuple[str | None, list[str]] | None:
         # The config data we report is the group map entry for the module.
@@ -266,14 +275,11 @@ def compile_scc_to_ir(
 
             # Switch to lower abstraction level IR.
             lower_ir(fn, compiler_options)
-            # Run char_str_index_fold before dependency collection so the new
-            # str_extra_ops.h primitives it introduces are picked up.
-            do_char_str_index_fold(fn, compiler_options)
             # Calculate implicit module dependencies (needed for librt)
             deps = find_implicit_op_dependencies(fn)
             if deps is not None:
                 module.dependencies.update(deps)
-            # Remaining optimizations.
+            # Perform optimizations.
             do_copy_propagation(fn, compiler_options)
             do_flag_elimination(fn, compiler_options)
 
@@ -300,7 +306,7 @@ def compile_modules_to_ir(
 
     # Process the graph by SCC in topological order, like we do in mypy.build
     for scc in sorted_components(result.graph):
-        scc_states = [result.graph[id] for id in scc.mod_ids]
+        scc_states = [result.graph[id] for id in sorted(scc.mod_ids)]
         trees = [st.tree for st in scc_states if st.id in mapper.group_map and st.tree]
 
         if not trees:
@@ -357,7 +363,12 @@ def compile_ir_to_c(
             if source.module in modules
         }
         if not group_modules:
-            ctext[group_name] = []
+            # Fully-cached group (e.g. pip's second setup.py invoke for
+            # the wheel phase): no fresh IR was produced. Reuse the file
+            # list recorded in any module's IR cache so the linker still
+            # sees the previous run's outputs; empty content is a "do
+            # not rewrite" sentinel for mypyc_build.
+            ctext[group_name] = _load_cached_group_files(group_sources, result)
             continue
         generator = GroupGenerator(
             group_modules, source_paths, group_name, mapper.group_map, names, compiler_options
@@ -365,6 +376,32 @@ def compile_ir_to_c(
         ctext[group_name] = generator.generate_c_for_modules()
 
     return ctext
+
+
+def _load_cached_group_files(
+    group_sources: list[BuildSource], result: BuildResult
+) -> list[tuple[str, str]]:
+    """Read the .c/.h paths recorded for this group on the previous run.
+
+    All modules in a group share the same src_hashes map, so the first
+    readable IR cache is sufficient. Returns paths paired with empty
+    content so callers can distinguish "reuse on disk" from "newly
+    generated".
+    """
+    for source in group_sources:
+        state = result.graph.get(source.module)
+        if state is None:
+            continue
+        try:
+            ir_json = result.manager.metastore.read(get_state_ir_cache_name(state))
+        except (FileNotFoundError, OSError):
+            continue
+        try:
+            ir_data = json.loads(ir_json)
+        except json.JSONDecodeError:
+            continue
+        return [(path, "") for path in ir_data.get("src_hashes", {})]
+    return []
 
 
 def get_ir_cache_name(id: str, path: str, options: Options) -> str:
@@ -454,8 +491,25 @@ def collect_source_dependencies(modules: dict[str, ModuleIR]) -> set[SourceDep]:
     for module in modules.values():
         for dep in module.dependencies:
             if isinstance(dep, SourceDep):
-                source_deps.add(dep)
+                if dep.internal:
+                    source_deps.add(dep)
+            elif isinstance(dep, Capsule):
+                source_deps.add(dep.internal_dep())
     return source_deps
+
+
+def collect_header_dependencies(modules: dict[str, ModuleIR], *, internal: bool) -> set[str]:
+    """Collect all header dependencies from all modules."""
+    header_deps: set[str] = set()
+    for module in modules.values():
+        for dep in module.dependencies:
+            if isinstance(dep, (SourceDep, HeaderDep)):
+                if dep.internal == internal:
+                    header_deps.add(dep.get_header())
+            else:
+                capsule_dep = dep.internal_dep() if internal else dep.external_dep()
+                header_deps.add(capsule_dep.get_header())
+    return header_deps
 
 
 def compile_modules_to_c(
@@ -592,14 +646,19 @@ class GroupGenerator:
 
         base_emitter = Emitter(self.context)
         # Optionally just include the runtime library c files to
-        # reduce the number of compiler invocations needed
+        # reduce the number of compiler invocations needed.
+        # Use <> form (only -I paths) so a shim file with the same
+        # basename as a runtime file can't shadow it. Triggered by
+        # mypyc/lower/int_ops.py vs lib-rt/int_ops.c on mypy self-compile.
         if self.compiler_options.include_runtime_files:
             for name in RUNTIME_C_FILES:
-                base_emitter.emit_line(f'#include "{name}"')
+                base_emitter.emit_line(f"#include <{name}>")
             # Include conditional source files
             source_deps = collect_source_dependencies(self.modules)
             for source_dep in sorted(source_deps, key=lambda d: d.path):
-                base_emitter.emit_line(f'#include "{source_dep.path}"')
+                base_emitter.emit_line(f"#include <{source_dep.path}>")
+            if self.compiler_options.depends_on_librt_internal:
+                base_emitter.emit_line("#include <internal/librt_internal_api.c>")
         base_emitter.emit_line(f'#include "__native{self.short_group_suffix}.h"')
         base_emitter.emit_line(f'#include "__native_internal{self.short_group_suffix}.h"')
         emitter = base_emitter
@@ -649,26 +708,27 @@ class GroupGenerator:
         ext_declarations.emit_line(f"#define MYPYC_NATIVE{self.group_suffix}_H")
         ext_declarations.emit_line("#include <Python.h>")
         ext_declarations.emit_line("#include <CPy.h>")
-        if self.compiler_options.depends_on_librt_internal:
-            ext_declarations.emit_line("#include <internal/librt_internal.h>")
-        if any(LIBRT_BASE64 in mod.dependencies for mod in self.modules.values()):
-            ext_declarations.emit_line("#include <base64/librt_base64.h>")
-        if any(LIBRT_STRINGS in mod.dependencies for mod in self.modules.values()):
-            ext_declarations.emit_line("#include <strings/librt_strings.h>")
-        if any(LIBRT_TIME in mod.dependencies for mod in self.modules.values()):
-            ext_declarations.emit_line("#include <time/librt_time.h>")
-        if any(LIBRT_VECS in mod.dependencies for mod in self.modules.values()):
-            ext_declarations.emit_line("#include <vecs/librt_vecs.h>")
-        # Include headers for conditional source files
-        source_deps = collect_source_dependencies(self.modules)
-        for source_dep in sorted(source_deps, key=lambda d: d.path):
-            ext_declarations.emit_line(f'#include "{source_dep.get_header()}"')
+
+        def emit_dep_headers(decls: Emitter, internal: bool) -> None:
+            suffix = "_api" if internal else ""
+            if self.compiler_options.depends_on_librt_internal:
+                decls.emit_line(f'#include "internal/librt_internal{suffix}.h"')
+            # Include headers for conditional source files
+            header_deps = collect_header_dependencies(self.modules, internal=internal)
+            for header_dep in sorted(header_deps):
+                decls.emit_line(f'#include "{header_dep}"')
+
+        emit_dep_headers(ext_declarations, False)
 
         declarations = Emitter(self.context)
         declarations.emit_line(f"#ifndef MYPYC_LIBRT_INTERNAL{self.group_suffix}_H")
         declarations.emit_line(f"#define MYPYC_LIBRT_INTERNAL{self.group_suffix}_H")
         declarations.emit_line("#include <Python.h>")
         declarations.emit_line("#include <CPy.h>")
+
+        if not self.compiler_options.include_runtime_files:
+            emit_dep_headers(declarations, True)
+
         declarations.emit_line(f'#include "__native{self.short_group_suffix}.h"')
         declarations.emit_line()
         declarations.emit_line("int CPyGlobalsInit(void);")
@@ -939,14 +999,15 @@ class GroupGenerator:
                 "if (done) return 0;",
             )
             if self.context.group_deps:
-                emitter.emit_line(
-                    "static PyObject *_mypyc_fromlist = NULL; "
-                    "if (!_mypyc_fromlist) { "
-                    '_mypyc_fromlist = Py_BuildValue("(s)", "*"); '
-                    "if (!_mypyc_fromlist) return -1; }"
+                emitter.emit_lines(
+                    "static PyObject *_mypyc_fromlist = NULL;",
+                    "if (!_mypyc_fromlist) {",
+                    '_mypyc_fromlist = Py_BuildValue("(s)", "*");',
+                    "if (!_mypyc_fromlist) return -1;",
+                    "}",
+                    "PyObject *tmp;",
+                    "PyObject *caps;",
                 )
-                emitter.emit_line("PyObject *tmp;")
-                emitter.emit_line("PyObject *caps;")
             for group in sorted(self.context.group_deps):
                 egroup = exported_name(group)
                 # ImportModuleLevel with fromlist returns the leaf via
@@ -1198,6 +1259,10 @@ class GroupGenerator:
             emitter.emit_line("if (import_librt_vecs() < 0) {")
             emitter.emit_line("return -1;")
             emitter.emit_line("}")
+        if LIBRT_RANDOM in module.dependencies:
+            emitter.emit_line("if (import_librt_random() < 0) {")
+            emitter.emit_line("return -1;")
+            emitter.emit_line("}")
         emitter.emit_line("PyObject* modname = NULL;")
         if self.multi_phase_init:
             emitter.emit_line(f"{module_static} = module;")
@@ -1322,11 +1387,42 @@ class GroupGenerator:
             f"if (unlikely({module_static} == NULL))",
             "    goto fail;",
         )
+
+        emitter.emit_line(f'modname = PyUnicode_FromString("{module_name}");')
+        emitter.emit_line("if (modname == NULL) CPyError_OutOfMemory();")
+        emitter.emit_line("int rv = 0;")
+        if self.group_name:
+            shared_lib_mod_name = shared_lib_name(self.group_name)
+            emitter.emit_line("PyObject *mod_dict = PyImport_GetModuleDict();")
+            emitter.emit_line("PyObject *shared_lib = NULL;")
+            emitter.emit_line(
+                f'rv = PyDict_GetItemStringRef(mod_dict, "{shared_lib_mod_name}", &shared_lib);'
+            )
+            emitter.emit_line("if (rv < 0) goto fail;")
+            emitter.emit_line(
+                'PyObject *shared_lib_file = PyObject_GetAttrString(shared_lib, "__file__");'
+            )
+            emitter.emit_line("if (shared_lib_file == NULL) goto fail;")
+        else:
+            emitter.emit_line(
+                f'PyObject *shared_lib_file = PyUnicode_FromString("{module_name + EXT_SUFFIX}");'
+            )
+            emitter.emit_line("if (shared_lib_file == NULL) CPyError_OutOfMemory();")
+        emitter.emit_line(f'PyObject *ext_suffix = PyUnicode_FromString("{EXT_SUFFIX}");')
+        emitter.emit_line("if (ext_suffix == NULL) CPyError_OutOfMemory();")
+        is_pkg = int(self.source_paths[module_name].endswith("__init__.py"))
+        emitter.emit_line(f"Py_ssize_t is_pkg = {is_pkg};")
+
+        emitter.emit_line(
+            f"rv = CPyImport_SetDunderAttrs({module_static}, modname, shared_lib_file, ext_suffix, is_pkg);"
+        )
+        emitter.emit_line("Py_DECREF(ext_suffix);")
+        emitter.emit_line("Py_DECREF(shared_lib_file);")
+        emitter.emit_line("if (rv < 0) goto fail;")
+
         # Register in sys.modules early so that circular imports via
         # CPyImport_ImportNative can detect that this module is already
         # being initialized and avoid re-executing the module body.
-        emitter.emit_line(f'modname = PyUnicode_FromString("{module_name}");')
-        emitter.emit_line("if (modname == NULL) CPyError_OutOfMemory();")
         emitter.emit_line(
             f"if (PyObject_SetItem(PyImport_GetModuleDict(), modname, {module_static}) < 0)"
         )
@@ -1384,7 +1480,7 @@ class GroupGenerator:
             if decl.mark:
                 return
 
-            for child in decl.declaration.dependencies:
+            for child in sorted(decl.declaration.dependencies):
                 _toposort_visit(child)
 
             result.append(decl.declaration)

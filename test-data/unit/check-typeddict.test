@@ -142,7 +142,7 @@ reveal_type(p)  # N: Revealed type is "TypedDict('__main__.EmptyDict', {})"
 [typing fixtures/typing-typeddict.pyi]
 
 
-[case testCanCreateTypedDictWithClassOldVersion]
+[case testCanCreateTypedDictWithClassFunctionBases]
 # Test that we can use class-syntax to merge function-based TypedDicts
 from typing import TypedDict
 
@@ -232,6 +232,20 @@ class D(TypedDict):
         pass
 d = D()
 reveal_type(d)  # N: Revealed type is "TypedDict('__main__.D', {})"
+[builtins fixtures/dict.pyi]
+[typing fixtures/typing-typeddict.pyi]
+
+[case testTypedDictDecoratorUndefinedNames]
+from typing import TypedDict
+
+@abc  # E: Name "abc" is not defined
+@efg.hij  # E: Name "efg" is not defined
+@klm[nop]  # E: Name "klm" is not defined \
+           # E: Name "nop" is not defined
+@qrs.tuv[wxy]  # E: Name "qrs" is not defined \
+               # E: Name "wxy" is not defined
+class A(TypedDict):
+    x: int
 [builtins fixtures/dict.pyi]
 [typing fixtures/typing-typeddict.pyi]
 
@@ -924,6 +938,18 @@ B = TypedDict('B', {'@type': Literal['b-type'], 'value': int})
 
 c: Union[A, B] = {'@type': 'a-type', 'value': 'Test'}  # E: Type of TypedDict is ambiguous, none of ("A", "B") matches cleanly \
                                                        # E: Incompatible types in assignment (expression has type "dict[str, str]", variable has type "A | B")
+[builtins fixtures/dict.pyi]
+[typing fixtures/typing-typeddict.pyi]
+
+[case testTypedDictUnionWithNonTypedDictLiteralKey]
+from typing import Union, TypedDict
+
+class Foo(TypedDict):
+    some: str
+    name: str
+
+baz: Union[Foo, dict[int, float]] = {1: 5.2}
+baz2: Union[Foo, dict[int, float]] = {'some': 'x', 'name': 'y'}
 [builtins fixtures/dict.pyi]
 [typing fixtures/typing-typeddict.pyi]
 

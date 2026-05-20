@@ -195,7 +195,7 @@ from mypy.nodes import (
     type_aliases_source_versions,
     typing_extensions_aliases,
 )
-from mypy.options import TYPE_FORM, Options
+from mypy.options import Options
 from mypy.patterns import (
     AsPattern,
     ClassPattern,
@@ -363,13 +363,6 @@ Tag: _TypeAlias = int
 # type expression and can be ignored quickly when attempting to parse a
 # string literal as a type expression.
 _MULTIPLE_WORDS_NONTYPE_RE = re.compile(r'\s*[^\s.\'"|\[]+\s+[^\s.\'"|\[]')
-
-# Matches any valid Python identifier, including identifiers with Unicode characters.
-#
-# [^\d\W] = word character that is not a digit
-# \w = word character
-# \Z = match end of string; does not allow a trailing \n, unlike $
-_IDENTIFIER_RE = re.compile(r"^[^\d\W]\w*\Z", re.UNICODE)
 
 
 class SemanticAnalyzer(
@@ -706,23 +699,21 @@ class SemanticAnalyzer(
 
     def refresh_top_level(self, file_node: MypyFile) -> None:
         """Reanalyze a stale module top-level in fine-grained incremental mode."""
-        if self.options.allow_redefinition_new and not self.options.local_partial_types:
+        if self.options.allow_redefinition and not self.options.local_partial_types:
             n = TempNode(AnyType(TypeOfAny.special_form))
             n.line = 1
             n.column = 0
             n.end_line = 1
             n.end_column = 0
-            self.fail("--local-partial-types must be enabled if using --allow-redefinition-new", n)
-        if self.options.allow_redefinition_new and self.options.allow_redefinition_old:
+            self.fail("--local-partial-types must be enabled if using --allow-redefinition", n)
+        if self.options.allow_redefinition and self.options.allow_redefinition_old:
             n = TempNode(AnyType(TypeOfAny.special_form))
             n.line = 1
             n.column = 0
             n.end_line = 1
             n.end_column = 0
             self.fail(
-                "--allow-redefinition-old and --allow-redefinition-new"
-                " should not be used together",
-                n,
+                "--allow-redefinition-old and --allow-redefinition should not be used together", n
             )
         self.recurse_into_functions = False
         self.add_implicit_module_attrs(file_node)
@@ -2112,18 +2103,20 @@ class SemanticAnalyzer(
             and defn.info.typeddict_type
             and not has_placeholder(defn.info.typeddict_type)
         ):
-            # This is a valid TypedDict, and it is fully analyzed.
-            return True
-        is_typeddict, info = self.typed_dict_analyzer.analyze_typeddict_classdef(defn)
+            # Don't reprocess everything
+            is_typeddict = True
+            info = defn.info
+        else:
+            is_typeddict, info = self.typed_dict_analyzer.analyze_typeddict_classdef(defn)
         if is_typeddict:
-            for decorator in defn.decorators:
-                decorator.accept(self)
-                if info is not None:
-                    self.analyze_class_decorator_common(defn, info, decorator)
             if info is None:
                 self.mark_incomplete(defn.name, defn)
             else:
                 self.prepare_class_def(defn, info, custom_names=True)
+            for decorator in defn.decorators:
+                decorator.accept(self)
+                if defn.info:
+                    self.analyze_class_decorator_common(defn, decorator)
             return True
         return False
 
@@ -2155,7 +2148,7 @@ class SemanticAnalyzer(
                 with self.scope.class_scope(defn.info):
                     for deco in defn.decorators:
                         deco.accept(self)
-                        self.analyze_class_decorator_common(defn, defn.info, deco)
+                        self.analyze_class_decorator_common(defn, deco)
                     with self.named_tuple_analyzer.save_namedtuple_body(info):
                         self.analyze_class_body_common(defn)
             return True
@@ -2237,7 +2230,7 @@ class SemanticAnalyzer(
 
     def analyze_class_decorator(self, defn: ClassDef, decorator: Expression) -> None:
         decorator.accept(self)
-        self.analyze_class_decorator_common(defn, defn.info, decorator)
+        self.analyze_class_decorator_common(defn, decorator)
         if isinstance(decorator, RefExpr):
             if decorator.fullname in RUNTIME_PROTOCOL_DECOS:
                 if defn.info.is_protocol:
@@ -2249,13 +2242,12 @@ class SemanticAnalyzer(
         ):
             defn.info.dataclass_transform_spec = self.parse_dataclass_transform_spec(decorator)
 
-    def analyze_class_decorator_common(
-        self, defn: ClassDef, info: TypeInfo, decorator: Expression
-    ) -> None:
+    def analyze_class_decorator_common(self, defn: ClassDef, decorator: Expression) -> None:
         """Common method for applying class decorators.
 
         Called on regular classes, typeddicts, and namedtuples.
         """
+        info = defn.info
         if refers_to_fullname(decorator, FINAL_DECORATOR_NAMES):
             info.is_final = True
         elif refers_to_fullname(decorator, DISJOINT_BASE_DECORATOR_NAMES):
@@ -2411,6 +2403,9 @@ class SemanticAnalyzer(
         if isinstance(t, UnboundType):
             sym = self.lookup_qualified(t.name, t)
             if sym and sym.fullname in UNPACK_TYPE_NAMES:
+                if not t.args:
+                    # Unpack used without arguments, e.g. `Protocol[Unpack]`
+                    return None
                 inner_t = t.args[0]
                 if isinstance(inner_t, UnboundType):
                     return self.analyze_unbound_tvar_impl(inner_t, is_unpacked=True)
@@ -3137,7 +3132,9 @@ class SemanticAnalyzer(
                     f'Module "{import_id}" does not explicitly export attribute "{source_id}"'
                 )
             elif not (
-                self.options.ignore_errors or self.cur_mod_node.path in self.errors.ignored_files
+                self.options.ignore_errors
+                or self.cur_mod_node.path in self.errors.ignored_files
+                or self.errors.prefer_simple_messages()
             ):
                 alternatives = set(module.names.keys()).difference({source_id})
                 matches = best_matches(source_id, alternatives, n=3)
@@ -3701,8 +3698,7 @@ class SemanticAnalyzer(
             )
 
     def analyze_rvalue_as_type_form(self, s: AssignmentStmt) -> None:
-        if TYPE_FORM in self.options.enable_incomplete_feature:
-            self.try_parse_as_type_expression(s.rvalue)
+        self.try_parse_as_type_expression(s.rvalue)
 
     def apply_dynamic_class_hook(self, s: AssignmentStmt) -> None:
         if not isinstance(s.rvalue, CallExpr):
@@ -4206,10 +4202,7 @@ class SemanticAnalyzer(
             eager=eager,
             python_3_12_type_alias=pep_695,
         )
-        if isinstance(s.rvalue, (IndexExpr, CallExpr, OpExpr)) and (
-            not isinstance(rvalue, OpExpr)
-            or (self.options.python_version >= (3, 10) or self.is_stub_file)
-        ):
+        if isinstance(s.rvalue, (IndexExpr, CallExpr, OpExpr)):
             # Note: CallExpr is for "void = type(None)" and OpExpr is for "X | Y" union syntax.
             if not isinstance(s.rvalue.analyzed, TypeAliasExpr):
                 # Any existing node will be updated in-place below.
@@ -4234,8 +4227,8 @@ class SemanticAnalyzer(
                     # Invalidate recursive status cache in case it was previously set.
                     existing.node._is_recursive = None
             else:
-                # Otherwise just replace existing placeholder with type alias.
-                existing.node = alias_node
+                # Otherwise just replace existing placeholder with type alias *in place*.
+                existing._node = alias_node
                 updated = True
             if updated:
                 if self.final_iteration:
@@ -4370,9 +4363,7 @@ class SemanticAnalyzer(
                 "tuple" if isinstance(get_proper_type(current_node.target), TupleType) else "union"
             )
             messages.append(f"Invalid recursive alias: a {target} item of itself")
-        if detect_diverging_alias(
-            current_node, current_node.target, self.lookup_qualified, self.tvar_scope
-        ):
+        if detect_diverging_alias(current_node, current_node.target):
             messages.append("Invalid recursive alias: type variable nesting on right hand side")
         if messages:
             current_node.target = AnyType(TypeOfAny.from_error)
@@ -4498,9 +4489,9 @@ class SemanticAnalyzer(
                 else:
                     lvalue.fullname = lvalue.name
                 if self.is_func_scope():
-                    if unmangle(name) == "_" and not self.options.allow_redefinition_new:
+                    if unmangle(name) == "_" and not self.options.allow_redefinition:
                         # Special case for assignment to local named '_': always infer 'Any'.
-                        # This isn't needed with --allow-redefinition-new, since arbitrary
+                        # This isn't needed with --allow-redefinition, since arbitrary
                         # types can be assigned to '_' anyway.
                         typ = AnyType(TypeOfAny.special_form)
                         self.store_declared_types(lvalue, typ)
@@ -5333,7 +5324,7 @@ class SemanticAnalyzer(
                         # never create module alias except on initial var definition
                         elif lval.is_inferred_def:
                             assert rnode.node is not None
-                            lnode.node = rnode.node
+                            lnode._node = rnode.node
 
     def process__all__(self, s: AssignmentStmt) -> None:
         """Export names if argument is a __all__ assignment."""
@@ -5457,8 +5448,7 @@ class SemanticAnalyzer(
             self.fail('"return" not allowed in except* block', s, serious=True)
         if s.expr:
             s.expr.accept(self)
-            if TYPE_FORM in self.options.enable_incomplete_feature:
-                self.try_parse_as_type_expression(s.expr)
+            self.try_parse_as_type_expression(s.expr)
         self.statement = old
 
     def visit_raise_stmt(self, s: RaiseStmt) -> None:
@@ -5772,8 +5762,8 @@ class SemanticAnalyzer(
                         # Invalidate recursive status cache in case it was previously set.
                         existing.node._is_recursive = None
                 else:
-                    # Otherwise just replace existing placeholder with type alias.
-                    existing.node = alias_node
+                    # Otherwise just replace existing placeholder with type alias *in place*.
+                    existing._node = alias_node
                     updated = True
 
                 if updated:
@@ -6061,11 +6051,9 @@ class SemanticAnalyzer(
             expr.analyzed.accept(self)
         else:
             # Normal call expression.
-            calculate_type_forms = TYPE_FORM in self.options.enable_incomplete_feature
             for a in expr.args:
                 a.accept(self)
-                if calculate_type_forms:
-                    self.try_parse_as_type_expression(a)
+                self.try_parse_as_type_expression(a)
 
             if (
                 isinstance(expr.callee, MemberExpr)
@@ -7148,7 +7136,7 @@ class SemanticAnalyzer(
         i = 1
         # Don't serialize redefined nodes. They are likely to have
         # busted internal references which can cause problems with
-        # serialization and they can't have any external references to
+        # serialization, and they can't have any external references to
         # them.
         symbol.no_serialize = True
         while True:
@@ -7529,6 +7517,18 @@ class SemanticAnalyzer(
             self.record_incomplete_ref()
             return
         message = f'Name "{name}" is not defined'
+        if (
+            not self.msg.prefer_simple_messages()
+            and "." not in name
+            and not (name.startswith("__") and name.endswith("__"))
+            and f"builtins.{name}" not in SUGGESTED_TEST_FIXTURES
+            and ctx.line not in self.errors.ignored_lines.get(self.errors.file, {})
+        ):
+            alternatives = self._get_names_in_scope()
+            alternatives.discard(name)
+            matches = best_matches(name, alternatives, n=3)
+            if matches:
+                message += f"; did you mean {pretty_seq(matches, 'or')}?"
         self.fail(message, ctx, code=codes.NAME_DEFINED)
 
         if f"builtins.{name}" in SUGGESTED_TEST_FIXTURES:
@@ -7552,6 +7552,39 @@ class SemanticAnalyzer(
                 ' (Suggestion: "from {module} import {name}")'
             ).format(module=module, name=lowercased[fullname].rsplit(".", 1)[-1])
             self.note(hint, ctx, code=codes.NAME_DEFINED)
+
+    def _get_names_in_scope(self) -> set[str]:
+        """Collect all names visible in the current scope for fuzzy matching suggestions.
+
+        This includes:
+        - Local variables (from function scopes)
+        - Class attributes (only when directly in class body, not in methods)
+        - Global/module-level names
+        - Builtins
+        """
+        names: set[str] = set()
+
+        for table in self.locals:
+            if table is not None:
+                names.update(table.keys())
+
+        if self.is_class_scope():
+            assert self.type is not None
+            names.update(self.type.names.keys())
+
+        names.update(self.globals.keys())
+
+        b = self.globals.get("__builtins__", None)
+        if b:
+            assert isinstance(b.node, MypyFile)
+            for builtin_name in b.node.names.keys():
+                if not (
+                    len(builtin_name) > 1 and builtin_name[0] == "_" and builtin_name[1] != "_"
+                ):
+                    names.add(builtin_name)
+
+        # Filter out internal/dunder names that aren't useful as suggestions
+        return {n for n in names if not n.startswith("__")}
 
     def already_defined(
         self, name: str, ctx: Context, original_ctx: SymbolTableNode | SymbolNode | None, noun: str
@@ -8006,16 +8039,9 @@ class SemanticAnalyzer(
             return
         elif isinstance(maybe_type_expr, StrExpr):
             str_value = maybe_type_expr.value  # cache
-            # Filter out string literals with common patterns that could not
-            # possibly be in a type expression
-            if _MULTIPLE_WORDS_NONTYPE_RE.match(str_value):
-                # A common pattern in string literals containing a sentence.
-                # But cannot be a type expression.
-                maybe_type_expr.as_type = None
-                return
             # Filter out string literals which look like an identifier but
             # cannot be a type expression, for a few common reasons
-            if _IDENTIFIER_RE.fullmatch(str_value):
+            if str_value.isidentifier():
                 sym = self.lookup(str_value, UnboundType(str_value), suppress_errors=True)
                 if sym is None:
                     # Does not refer to anything in the local symbol table
@@ -8041,13 +8067,21 @@ class SemanticAnalyzer(
                         return
             else:  # does not look like an identifier
                 if '"' in str_value or "'" in str_value:
-                    # Only valid inside a Literal[...] type
+                    # Only valid inside a Literal[...] or Annotated[..., ...] type
                     if "[" not in str_value:
-                        # Cannot be a Literal[...] type
+                        # Cannot be a Literal[...] or Annotated[..., ...] type
                         maybe_type_expr.as_type = None
                         return
-                elif str_value == "":
-                    # Empty string is not a valid type
+                elif len(str_value) < 2 or str_value.isspace():
+                    # Whitespace-only strings cannot be valid types. Very short strings can
+                    # only be valid if they are identifiers, but we already checked for those.
+                    maybe_type_expr.as_type = None
+                    return
+                # Filter out string literals with common patterns that could not
+                # possibly be in a type expression
+                if _MULTIPLE_WORDS_NONTYPE_RE.match(str_value):
+                    # A common pattern in string literals containing a sentence.
+                    # But cannot be a type expression.
                     maybe_type_expr.as_type = None
                     return
         elif isinstance(maybe_type_expr, IndexExpr):

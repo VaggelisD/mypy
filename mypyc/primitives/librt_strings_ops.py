@@ -1,4 +1,9 @@
-from mypyc.ir.deps import BYTES_WRITER_EXTRA_OPS, LIBRT_STRINGS, STRING_WRITER_EXTRA_OPS
+from mypyc.ir.deps import (
+    BYTES_WRITER_EXTRA_OPS,
+    CODEPOINT_EXTRA_OPS,
+    LIBRT_STRINGS,
+    STRING_WRITER_EXTRA_OPS,
+)
 from mypyc.ir.ops import ERR_MAGIC, ERR_MAGIC_OVERLAPPING, ERR_NEVER
 from mypyc.ir.rtypes import (
     bool_rprimitive,
@@ -24,7 +29,6 @@ function_op(
     return_type=bytes_writer_rprimitive,
     c_function_name="LibRTStrings_BytesWriter_internal",
     error_kind=ERR_MAGIC,
-    experimental=True,
     dependencies=[LIBRT_STRINGS],
 )
 
@@ -34,7 +38,6 @@ method_op(
     return_type=bytes_rprimitive,
     c_function_name="LibRTStrings_BytesWriter_getvalue_internal",
     error_kind=ERR_MAGIC,
-    experimental=True,
     dependencies=[LIBRT_STRINGS],
 )
 
@@ -44,7 +47,6 @@ method_op(
     return_type=none_rprimitive,
     c_function_name="CPyBytesWriter_Write",
     error_kind=ERR_MAGIC,
-    experimental=True,
     dependencies=[LIBRT_STRINGS, BYTES_WRITER_EXTRA_OPS],
 )
 
@@ -54,7 +56,6 @@ method_op(
     return_type=none_rprimitive,
     c_function_name="CPyBytesWriter_Write",
     error_kind=ERR_MAGIC,
-    experimental=True,
     dependencies=[LIBRT_STRINGS, BYTES_WRITER_EXTRA_OPS],
 )
 
@@ -64,7 +65,6 @@ method_op(
     return_type=none_rprimitive,
     c_function_name="CPyBytesWriter_Append",
     error_kind=ERR_MAGIC,
-    experimental=True,
     dependencies=[LIBRT_STRINGS, BYTES_WRITER_EXTRA_OPS],
 )
 
@@ -74,7 +74,6 @@ method_op(
     return_type=none_rprimitive,
     c_function_name="LibRTStrings_BytesWriter_truncate_internal",
     error_kind=ERR_MAGIC,
-    experimental=True,
     dependencies=[LIBRT_STRINGS],
 )
 
@@ -84,7 +83,6 @@ function_op(
     return_type=short_int_rprimitive,
     c_function_name="CPyBytesWriter_Len",
     error_kind=ERR_NEVER,
-    experimental=True,
     dependencies=[LIBRT_STRINGS, BYTES_WRITER_EXTRA_OPS],
 )
 
@@ -95,7 +93,6 @@ bytes_writer_adjust_index_op = custom_primitive_op(
     return_type=int64_rprimitive,
     c_function_name="CPyBytesWriter_AdjustIndex",
     error_kind=ERR_NEVER,
-    experimental=True,
     dependencies=[LIBRT_STRINGS, BYTES_WRITER_EXTRA_OPS],
 )
 
@@ -106,7 +103,6 @@ bytes_writer_range_check_op = custom_primitive_op(
     return_type=bool_rprimitive,
     c_function_name="CPyBytesWriter_RangeCheck",
     error_kind=ERR_NEVER,
-    experimental=True,
     dependencies=[LIBRT_STRINGS, BYTES_WRITER_EXTRA_OPS],
 )
 
@@ -117,7 +113,6 @@ bytes_writer_get_item_unsafe_op = custom_primitive_op(
     return_type=uint8_rprimitive,
     c_function_name="CPyBytesWriter_GetItem",
     error_kind=ERR_NEVER,
-    experimental=True,
     dependencies=[LIBRT_STRINGS, BYTES_WRITER_EXTRA_OPS],
 )
 
@@ -128,7 +123,6 @@ bytes_writer_set_item_unsafe_op = custom_primitive_op(
     return_type=void_rtype,
     c_function_name="CPyBytesWriter_SetItem",
     error_kind=ERR_NEVER,
-    experimental=True,
     dependencies=[LIBRT_STRINGS, BYTES_WRITER_EXTRA_OPS],
 )
 
@@ -140,7 +134,6 @@ function_op(
     return_type=none_rprimitive,
     c_function_name="CPyBytesWriter_WriteI16LE",
     error_kind=ERR_MAGIC,
-    experimental=True,
     dependencies=[LIBRT_STRINGS, BYTES_WRITER_EXTRA_OPS],
 )
 
@@ -150,7 +143,6 @@ function_op(
     return_type=none_rprimitive,
     c_function_name="CPyBytesWriter_WriteI16BE",
     error_kind=ERR_MAGIC,
-    experimental=True,
     dependencies=[LIBRT_STRINGS, BYTES_WRITER_EXTRA_OPS],
 )
 
@@ -160,7 +152,6 @@ function_op(
     return_type=int16_rprimitive,
     c_function_name="CPyBytes_ReadI16LE",
     error_kind=ERR_MAGIC_OVERLAPPING,
-    experimental=True,
     dependencies=[LIBRT_STRINGS, BYTES_WRITER_EXTRA_OPS],
 )
 
@@ -170,7 +161,6 @@ function_op(
     return_type=int16_rprimitive,
     c_function_name="CPyBytes_ReadI16BE",
     error_kind=ERR_MAGIC_OVERLAPPING,
-    experimental=True,
     dependencies=[LIBRT_STRINGS, BYTES_WRITER_EXTRA_OPS],
 )
 
@@ -182,7 +172,6 @@ function_op(
     return_type=none_rprimitive,
     c_function_name="CPyBytesWriter_WriteI32LE",
     error_kind=ERR_MAGIC,
-    experimental=True,
     dependencies=[LIBRT_STRINGS, BYTES_WRITER_EXTRA_OPS],
 )
 
@@ -192,7 +181,6 @@ function_op(
     return_type=none_rprimitive,
     c_function_name="CPyBytesWriter_WriteI32BE",
     error_kind=ERR_MAGIC,
-    experimental=True,
     dependencies=[LIBRT_STRINGS, BYTES_WRITER_EXTRA_OPS],
 )
 
@@ -202,7 +190,6 @@ function_op(
     return_type=int32_rprimitive,
     c_function_name="CPyBytes_ReadI32LE",
     error_kind=ERR_MAGIC_OVERLAPPING,
-    experimental=True,
     dependencies=[LIBRT_STRINGS, BYTES_WRITER_EXTRA_OPS],
 )
 
@@ -212,7 +199,6 @@ function_op(
     return_type=int32_rprimitive,
     c_function_name="CPyBytes_ReadI32BE",
     error_kind=ERR_MAGIC_OVERLAPPING,
-    experimental=True,
     dependencies=[LIBRT_STRINGS, BYTES_WRITER_EXTRA_OPS],
 )
 
@@ -224,7 +210,6 @@ function_op(
     return_type=none_rprimitive,
     c_function_name="CPyBytesWriter_WriteI64LE",
     error_kind=ERR_MAGIC,
-    experimental=True,
     dependencies=[LIBRT_STRINGS, BYTES_WRITER_EXTRA_OPS],
 )
 
@@ -234,7 +219,6 @@ function_op(
     return_type=none_rprimitive,
     c_function_name="CPyBytesWriter_WriteI64BE",
     error_kind=ERR_MAGIC,
-    experimental=True,
     dependencies=[LIBRT_STRINGS, BYTES_WRITER_EXTRA_OPS],
 )
 
@@ -244,7 +228,6 @@ function_op(
     return_type=int64_rprimitive,
     c_function_name="CPyBytes_ReadI64LE",
     error_kind=ERR_MAGIC_OVERLAPPING,
-    experimental=True,
     dependencies=[LIBRT_STRINGS, BYTES_WRITER_EXTRA_OPS],
 )
 
@@ -254,7 +237,6 @@ function_op(
     return_type=int64_rprimitive,
     c_function_name="CPyBytes_ReadI64BE",
     error_kind=ERR_MAGIC_OVERLAPPING,
-    experimental=True,
     dependencies=[LIBRT_STRINGS, BYTES_WRITER_EXTRA_OPS],
 )
 
@@ -266,7 +248,6 @@ function_op(
     return_type=none_rprimitive,
     c_function_name="CPyBytesWriter_WriteF32LE",
     error_kind=ERR_MAGIC,
-    experimental=True,
     dependencies=[LIBRT_STRINGS, BYTES_WRITER_EXTRA_OPS],
 )
 
@@ -276,7 +257,6 @@ function_op(
     return_type=none_rprimitive,
     c_function_name="CPyBytesWriter_WriteF32BE",
     error_kind=ERR_MAGIC,
-    experimental=True,
     dependencies=[LIBRT_STRINGS, BYTES_WRITER_EXTRA_OPS],
 )
 
@@ -286,7 +266,6 @@ function_op(
     return_type=float_rprimitive,
     c_function_name="CPyBytes_ReadF32LE",
     error_kind=ERR_MAGIC_OVERLAPPING,
-    experimental=True,
     dependencies=[LIBRT_STRINGS, BYTES_WRITER_EXTRA_OPS],
 )
 
@@ -296,7 +275,6 @@ function_op(
     return_type=float_rprimitive,
     c_function_name="CPyBytes_ReadF32BE",
     error_kind=ERR_MAGIC_OVERLAPPING,
-    experimental=True,
     dependencies=[LIBRT_STRINGS, BYTES_WRITER_EXTRA_OPS],
 )
 
@@ -308,7 +286,6 @@ function_op(
     return_type=none_rprimitive,
     c_function_name="CPyBytesWriter_WriteF64LE",
     error_kind=ERR_MAGIC,
-    experimental=True,
     dependencies=[LIBRT_STRINGS, BYTES_WRITER_EXTRA_OPS],
 )
 
@@ -318,7 +295,6 @@ function_op(
     return_type=none_rprimitive,
     c_function_name="CPyBytesWriter_WriteF64BE",
     error_kind=ERR_MAGIC,
-    experimental=True,
     dependencies=[LIBRT_STRINGS, BYTES_WRITER_EXTRA_OPS],
 )
 
@@ -328,7 +304,6 @@ function_op(
     return_type=float_rprimitive,
     c_function_name="CPyBytes_ReadF64LE",
     error_kind=ERR_MAGIC_OVERLAPPING,
-    experimental=True,
     dependencies=[LIBRT_STRINGS, BYTES_WRITER_EXTRA_OPS],
 )
 
@@ -338,7 +313,6 @@ function_op(
     return_type=float_rprimitive,
     c_function_name="CPyBytes_ReadF64BE",
     error_kind=ERR_MAGIC_OVERLAPPING,
-    experimental=True,
     dependencies=[LIBRT_STRINGS, BYTES_WRITER_EXTRA_OPS],
 )
 
@@ -350,7 +324,6 @@ function_op(
     return_type=string_writer_rprimitive,
     c_function_name="LibRTStrings_StringWriter_internal",
     error_kind=ERR_MAGIC,
-    experimental=True,
     dependencies=[LIBRT_STRINGS],
 )
 
@@ -360,7 +333,6 @@ method_op(
     return_type=str_rprimitive,
     c_function_name="LibRTStrings_StringWriter_getvalue_internal",
     error_kind=ERR_MAGIC,
-    experimental=True,
     dependencies=[LIBRT_STRINGS],
 )
 
@@ -370,7 +342,6 @@ method_op(
     return_type=none_rprimitive,
     c_function_name="LibRTStrings_StringWriter_write_internal",
     error_kind=ERR_MAGIC,
-    experimental=True,
     dependencies=[LIBRT_STRINGS],
 )
 
@@ -380,7 +351,6 @@ method_op(
     return_type=none_rprimitive,
     c_function_name="CPyStringWriter_Append",
     error_kind=ERR_MAGIC,
-    experimental=True,
     dependencies=[LIBRT_STRINGS, STRING_WRITER_EXTRA_OPS],
 )
 
@@ -390,7 +360,6 @@ function_op(
     return_type=short_int_rprimitive,
     c_function_name="CPyStringWriter_Len",
     error_kind=ERR_NEVER,
-    experimental=True,
     dependencies=[LIBRT_STRINGS, STRING_WRITER_EXTRA_OPS],
 )
 
@@ -401,7 +370,6 @@ string_writer_adjust_index_op = custom_primitive_op(
     return_type=int64_rprimitive,
     c_function_name="CPyStringWriter_AdjustIndex",
     error_kind=ERR_NEVER,
-    experimental=True,
     dependencies=[LIBRT_STRINGS, STRING_WRITER_EXTRA_OPS],
 )
 
@@ -412,7 +380,6 @@ string_writer_range_check_op = custom_primitive_op(
     return_type=bool_rprimitive,
     c_function_name="CPyStringWriter_RangeCheck",
     error_kind=ERR_NEVER,
-    experimental=True,
     dependencies=[LIBRT_STRINGS, STRING_WRITER_EXTRA_OPS],
 )
 
@@ -423,6 +390,44 @@ string_writer_get_item_unsafe_op = custom_primitive_op(
     return_type=int32_rprimitive,
     c_function_name="CPyStringWriter_GetItem",
     error_kind=ERR_NEVER,
-    experimental=True,
     dependencies=[LIBRT_STRINGS, STRING_WRITER_EXTRA_OPS],
+)
+
+
+# Codepoint classification helpers operating on i32 codepoints
+# (typically obtained via ord(s[i])). Negative inputs return False.
+function_op(
+    name="librt.strings.isspace",
+    arg_types=[int32_rprimitive],
+    return_type=bool_rprimitive,
+    c_function_name="LibRTStrings_IsSpace",
+    error_kind=ERR_NEVER,
+    dependencies=[LIBRT_STRINGS, CODEPOINT_EXTRA_OPS],
+)
+
+function_op(
+    name="librt.strings.isdigit",
+    arg_types=[int32_rprimitive],
+    return_type=bool_rprimitive,
+    c_function_name="LibRTStrings_IsDigit",
+    error_kind=ERR_NEVER,
+    dependencies=[LIBRT_STRINGS, CODEPOINT_EXTRA_OPS],
+)
+
+function_op(
+    name="librt.strings.isalnum",
+    arg_types=[int32_rprimitive],
+    return_type=bool_rprimitive,
+    c_function_name="LibRTStrings_IsAlnum",
+    error_kind=ERR_NEVER,
+    dependencies=[LIBRT_STRINGS, CODEPOINT_EXTRA_OPS],
+)
+
+function_op(
+    name="librt.strings.isalpha",
+    arg_types=[int32_rprimitive],
+    return_type=bool_rprimitive,
+    c_function_name="LibRTStrings_IsAlpha",
+    error_kind=ERR_NEVER,
+    dependencies=[LIBRT_STRINGS, CODEPOINT_EXTRA_OPS],
 )
