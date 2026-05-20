@@ -175,7 +175,8 @@ def load_type_map(mapper: Mapper, modules: list[MypyFile], deser_ctx: DeserMaps)
                     continue
                 mapper.type_to_ir[node.node] = ir
                 mapper.symbol_fullnames.add(node.node.fullname)
-                mapper.func_to_decl[node.node] = ir.ctor
+                if not ir.is_trait and not ir.builtin_base:
+                    mapper.func_to_decl[node.node] = ir.ctor
 
     for module in modules:
         for func in get_module_func_defs(module):
