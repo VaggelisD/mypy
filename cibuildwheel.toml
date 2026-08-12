@@ -8,7 +8,8 @@ linux.musllinux-aarch64-image = "musllinux_1_2"
 
 enable = []
 
-# Skip: PyPy, 32-bit, musllinux aarch64, Windows, free-threaded builds.
+# Skip: PyPy, 32-bit, musllinux aarch64, Windows, free-threaded builds,
+# prerelease CPython (3.15).
 # PyPy lacks prebuilt ast-serialize wheels and the build env can't bootstrap
 # the Rust toolchain that maturin needs.
 skip = [
@@ -18,6 +19,8 @@ skip = [
   "*-musllinux_aarch64",
   "cp313t-*",
   "cp314t-*",
+  "cp315-*",
+  "cp315t-*",
   "*-manylinux_i686",
 ]
 
